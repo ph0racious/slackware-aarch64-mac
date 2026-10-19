@@ -1,0 +1,29 @@
+# Completes what plasma-pa's own disable_kmix.upd intends.
+#
+# kmix is superseded by the Plasma volume applet on Plasma 5.27 -- plasma-pa
+# ships kconf_update/plasmaVolumeDisableKMixAutostart.pl, and that script's
+# entire body writes AutoStart=false and startkdeRestore=false.
+#
+# It matters more here than upstream. kmix's autostart entry declares
+#
+#     X-KDE-autostart-after=pulseaudio
+#
+# and this port disables PulseAudio's autostart entry, because PulseAudio
+# otherwise takes the socket and serves auto_null. That leaves kmix ordered
+# after an entry which never runs, so the constraint evaporates: kmix launches
+# before any sound server exists, finds none -- client.conf.d/99-asahi tells it
+# not to spawn one -- and falls back to the raw ALSA card.
+#
+# That fallback is worse than it looks. The raw ALSA controls are the
+# amplifiers' and the audio routing's: speakersafetyd sets Amp Gain and the
+# ISENSE switches, and the UCM profiles set the Mux selectors. They are not a
+# volume control and should not be presented as one.
+#
+# AutoStart is kmix's own documented switch, read through
+# X-KDE-autostart-condition=kmixrc:Global:AutoStart:true. This file is
+# system-wide; a user who wants kmix autostarted sets AutoStart=true in their
+# own ~/.config/kmixrc, which wins. kmix launched by hand works normally --
+# with a server already up it selects the PulseAudio backend, as intended.
+[Global]
+AutoStart=false
+startkdeRestore=false

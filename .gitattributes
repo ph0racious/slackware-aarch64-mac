@@ -1,0 +1,14 @@
+# Never translate line endings, in either direction.
+#
+# This tree carries files that must stay byte-identical to what upstream ships
+# -- vendored Slackware ARM sources under source/slackware-k/, and the U-Boot
+# patch series under source/hwm-bw-mac/patches/. It also carries shell scripts
+# that are packaged and then executed on the target, where a "/bin/bash\r"
+# shebang fails at boot with "bad interpreter". A checkout with core.autocrlf
+# enabled would introduce exactly that, so the rule is absolute rather than
+# per-extension.
+#
+# tools/check-tree-hygiene.sh enforces the same thing before anything is built,
+# and also catches a UTF-8 BOM before a shebang -- the same failure by another
+# route, and one the CRLF check does not see.
+* -text

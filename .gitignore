@@ -1,0 +1,32 @@
+# Built packages are published as release artifacts, never committed.
+*.txz
+*.tgz
+*.txt.asc
+*.md5
+*.sha256
+
+# Upstream source tarballs, fetched by the fetch-sources script.
+source/*/sources/*.tar.*
+source/*/sources/*.tgz
+sources/
+
+# Build scratch
+build/
+tmp/
+package-*/
+*.o
+*.ko
+
+# Editor/agent tooling state. Personal to whoever is working on the tree.
+.claude/
+
+# Editor / OS noise
+*.swp
+*~
+.DS_Store
+Thumbs.db
+__pycache__/
+*.pyc
+
+# Local development notes; not part of the published tree.
+notes/

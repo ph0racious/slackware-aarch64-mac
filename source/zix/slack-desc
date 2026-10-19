@@ -1,0 +1,19 @@
+# HOW TO EDIT THIS FILE:
+# The "handy ruler" below makes it easier to edit a package description.
+# Line up the first '|' above the ':' following the base package name, and
+# the '|' on the right side marks the last column you can put a character in.
+# You must make exactly 11 lines for the formatting to be correct. It's also
+# customary to leave one space after the ':' except on otherwise blank lines.
+
+   |-----handy-ruler------------------------------------------------------|
+zix: zix (lightweight C utility library)
+zix:
+zix: Zix is drobilla's small C utility library (data structures, filesystem
+zix: and threading helpers). Sord depends on it, so it sits at the bottom
+zix: of the LV2 stack.
+zix:
+zix:
+zix:
+zix:
+zix: REQUIRED by the Apple Silicon audio chain (sord dependency).
+zix: Homepage: https://lv2plug.in/

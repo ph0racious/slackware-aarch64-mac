@@ -1,0 +1,34 @@
+#!/bin/sh
+#BLURB="Install Apple Wi-Fi, Bluetooth and other vendor firmware"
+# Install Apple's Wi-Fi, Bluetooth and other vendor firmware on the target, at
+# install time.
+#
+# The BLURB line above is what pkgtool's Setup menu shows beside this script;
+# every stock setup.* carries one, and without it the entry is listed blank.
+# pkgtool reads it with grep for the hash-prefixed token, so that token must
+# appear on exactly one line of this file.
+#
+# Slackware's own extension point: SeTconfig runs every
+# $T_PX/var/log/setup/setup.* in sorted order, with $1 = the target prefix and
+# $2 = the root device, from a subshell whose cwd is the target. Stuart ships
+# board-specific install-time work the same way -- setup.11.bootloader-flash-
+# lx2160acex7, setup.12.bootloader-flash-rk3399 -- and this is that same kind
+# of job for this board.
+#
+# WHY THE NAME SORTS WHERE IT DOES. The glob is sorted, and `setup.timeconfig`
+# is in the same list. `vendorfw-mac` sorts after `timeconfig`, so the target
+# has a timezone by the time this runs and --regdom=auto has something to read.
+# Numbered names (setup.NN.*) sort BEFORE every unnumbered one, so a number
+# here would run too early and leave the regulatory domain at 00.
+#
+# Exit status is deliberately not forced to 0: SeTconfig never looks at it, and
+# nothing above it should start caring. A failure belongs in the log this
+# writes, and `verify-install-mac` fails when the firmware is not there.
+
+T_PX=${1:-/}
+
+# Second and later runs (setup CONFIGURE) are fine -- the tool is idempotent.
+[ -x "$T_PX/usr/sbin/vendorfw-install-mac" ] || exit 0
+
+chroot "$T_PX" /usr/sbin/vendorfw-install-mac --regdom=auto \
+  > "$T_PX/var/log/vendorfw-install-mac.log" 2>&1

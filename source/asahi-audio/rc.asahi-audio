@@ -1,0 +1,108 @@
+#!/bin/sh
+#
+# /etc/rc.d/rc.asahi-audio
+#
+# Keeps PulseAudio's autostart entry disabled so PipeWire serves this machine's
+# audio. Asserted at every boot, not only at install time.
+#
+# WHY A BOOT-TIME ASSERTION AND NOT JUST doinst.sh.
+#
+#   The switch is a literal `Hidden=true` in
+#   /etc/xdg/autostart/pulseaudio.desktop. That is the only thing
+#   /usr/bin/start-pulseaudio-x11 honours -- it greps /etc/pulse/client.conf
+#   LITERALLY and never reads client.conf.d, so the drop-in this package also
+#   ships closes the client-library path and not this one.
+#
+#   doinst.sh writes that switch, but on a FULL-SERIES INSTALL it cannot:
+#   packages install in series order and asahi-audio sorts before pulseaudio
+#   in l/, so when doinst.sh runs there is no pulseaudio.desktop yet, and
+#   pulseaudio's own install then lays down the stock one.
+#
+#   Both sound servers then start. Ordering cannot decide the outcome -- KDE
+#   does not wait for a phase-1 autostart entry -- so it is a coin toss between
+#   working audio and a dummy output. Asserting at boot closes that, and is
+#   idempotent. (A later pulseaudio upgrade is not a risk: its config() keeps
+#   an edited pulseaudio.desktop and leaves the new one as .new.)
+#
+# To go back to PulseAudio and kmix: `/etc/rc.d/rc.asahi-audio stop`, then
+# `chmod -x` this script. The boot hook (/etc/rc.d/rc.platform.d/aarch64/
+# asahi-audio) then skips it, start-session no longer starts PipeWire at login,
+# and package upgrades leave PulseAudio's autostart entry as you restored it.
+
+PADESK=/etc/xdg/autostart/pulseaudio.desktop
+ORIG=$PADESK.asahi-orig
+KMIXRC=/etc/xdg/kmixrc
+
+switched() { [ -f "$PADESK" ] && grep -q '^Hidden=true$' "$PADESK"; }
+
+# kmix's autostart entry declares X-KDE-autostart-after=pulseaudio. Disabling
+# that entry above leaves the dependency naming something which never runs, so
+# kmix starts before any sound server and falls back to the raw ALSA card,
+# whose controls speakersafetyd and the UCM profiles set. AutoStart=false is
+# kmix's own documented switch and is what plasma-pa's disable_kmix.upd writes.
+kmix_off() { [ -f "$KMIXRC" ] && grep -q '^AutoStart=false$' "$KMIXRC"; }
+
+aa_start() {
+  if [ ! -f "$PADESK" ]; then
+    echo "asahi-audio: $PADESK not present, nothing to disable"
+    return 0
+  fi
+  switched && return 0
+  [ -f "$ORIG" ] || cp -a "$PADESK" "$ORIG"
+  printf 'Hidden=true\n' >> "$PADESK"
+  echo "asahi-audio: disabled PulseAudio's autostart entry (original: $ORIG)"
+}
+
+
+aa_kmix_start() {
+  kmix_off && return 0
+  if [ ! -f "$KMIXRC" ]; then
+    printf '[Global]\nAutoStart=false\nstartkdeRestore=false\n' > "$KMIXRC"
+    chmod 644 "$KMIXRC"
+  elif grep -q '^AutoStart=' "$KMIXRC"; then
+    sed -i 's/^AutoStart=.*/AutoStart=false/' "$KMIXRC"
+  elif grep -q '^\[Global\]$' "$KMIXRC"; then
+    sed -i '/^\[Global\]$/a AutoStart=false' "$KMIXRC"
+  else
+    printf '\n[Global]\nAutoStart=false\n' >> "$KMIXRC"
+  fi
+  echo "asahi-audio: kmix autostart disabled in $KMIXRC (plasma-pa replaces it)"
+}
+
+aa_kmix_stop() {
+  [ -f "$KMIXRC" ] || return 0
+  kmix_off || return 0
+  sed -i 's/^AutoStart=false$/AutoStart=true/' "$KMIXRC"
+  echo "asahi-audio: re-enabled kmix autostart"
+}
+aa_stop() {
+  [ -f "$PADESK" ] || return 0
+  switched || return 0
+  sed -i '/^Hidden=true$/d' "$PADESK"
+  echo "asahi-audio: re-enabled PulseAudio's autostart entry"
+}
+
+aa_status() {
+  if kmix_off; then
+    echo "asahi-audio: kmix autostart disabled -- plasma-pa is the mixer."
+  else
+    echo "asahi-audio: kmix autostart is ENABLED -- it may start before the" >&2
+    echo "             sound server and fall back to raw ALSA controls." >&2
+  fi
+  if switched; then
+    echo "asahi-audio: PulseAudio autostart disabled -- PipeWire serves audio."
+    kmix_off || return 1
+    return 0
+  fi
+  echo "asahi-audio: PulseAudio autostart is ENABLED -- both sound servers will" >&2
+  echo "             start and the desktop may show a dummy output." >&2
+  return 1
+}
+
+case "$1" in
+  start)   aa_start; aa_kmix_start ;;
+  stop)    aa_stop; aa_kmix_stop ;;
+  restart) aa_stop; aa_kmix_stop; aa_start; aa_kmix_start ;;
+  status)  aa_status ;;
+  *)       echo "usage: $0 {start|stop|restart|status}" >&2; exit 1 ;;
+esac

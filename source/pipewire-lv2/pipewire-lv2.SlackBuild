@@ -1,0 +1,320 @@
+#!/bin/bash
+
+# Slackware build script for PipeWire, rebuilt WITH LV2 support
+
+# Heavily based on Slackware ARM's own pipewire.SlackBuild. The result must be
+# the pinned base's pipewire package file for file, directories and symlinks
+# included, plus LV2; a check near the end compares the two packages, both ways.
+#
+# Copyright 2020  Eric Hameleers, Eindhoven, NL
+# Copyright 2020-2027  Patrick J. Volkerding, Sebeka, Minnesota, USA
+# Modified by Stuart Winter for Slackware ARM
+# Copyright 2026  Jim Phoenix, Earth, Milky Way
+# All rights reserved.
+#
+# Redistribution and use of this script, with or without modification, is
+# permitted provided that the following conditions are met:
+#
+# 1. Redistributions of this script must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+#
+#  THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR IMPLIED
+#  WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+#  MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO
+#  EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+#  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+#  PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+#  OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+#  WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+#  OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+#  ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+# WHY THIS PACKAGE EXISTS
+# -----------------------
+# asahi-audio does its DSP by loading LV2 plugins into a PipeWire filter chain.
+# Slackware's stock PipeWire cannot do that: it ships no
+# spa-0.2/filter-graph/libspa-filter-graph-plugin-lv2.so (the LV2 backend; see
+# the verification near the end), and there is no LV2 SDK and no /usr/lib64/lv2.
+#
+# The cause is not a deliberate choice upstream -- PipeWire's meson option is
+#   option('lv2', description: 'Enable loading of LV2 plugins', value: 'auto')
+# and `auto` silently resolves to *disabled* when lilv is absent, as it is on
+# stock Slackware. With this tree's lilv installed, PipeWire builds with LV2
+# support.
+#
+# We pass -Dlv2=enabled rather than relying on `auto` so that a missing lilv
+# fails the build loudly instead of quietly producing another LV2-less PipeWire.
+#
+# RELATIONSHIP TO SLACKWARE'S PACKAGE
+# -----------------------------------
+# Slackware's PipeWire plus one option, -Dlv2=enabled. "Slackware's" means the
+# PINNED BASE'S package, l/pipewire on efi_generic.iso, not whatever Stuart's
+# script says today. That script moves on: an earlier copy of this file took its
+# flags from a newer revision, and so shipped JACK and a gsettings schema the
+# base's package does not have (the schema collides with pulseaudio's) while
+# missing files the base's package does have. The flags below reproduce the
+# base's package, and the parity check near the end holds them to it.
+#
+# The upstream version is kept identical to the base's (1.6.6 here), so this is
+# a rebuild, not an upgrade.
+#
+# ONE DELIBERATE EXCEPTION. Stock ships Pat's pipewire-enable.sh and
+# pipewire-disable.sh, and the pipewire{,-pulse}.desktop.sample autostart
+# entries they rename. They are left out: asahi-audio turns PipeWire on with its
+# own launcher, so on this system enable.sh would start a second pipewire and a
+# second WirePlumber beside it, and disable.sh would be undone at the next boot
+# by rc.asahi-audio. Two switches for one thing is a trap; this keeps one. The
+# slack-desc says so, and the parity check names exactly these four files and
+# the three directories that hold nothing else. Stock's doinst.sh deletes
+# redundant copies of the two .sample entries; with no .sample entries shipped,
+# that has nothing to do here.
+#
+# It cannot literally reuse Slackware's SlackBuild: that script depends on
+# Stuart Winter's ARM build framework (slackbuildinfo, slackset_var_cwds,
+# mkpkgdirs, failextract, ...) and is not standalone-runnable outside it.
+#
+# The package NAME is deliberately 'pipewire' (not 'pipewire-lv2') so it
+# upgrades/replaces the stock package rather than colliding with it. The source
+# directory is named pipewire-lv2 only to distinguish our build recipe.
+#
+# WHEN THE BASE IS RE-PINNED this package must be rebuilt to match its
+# pipewire, or the parity check fails. It reads the stock package from the
+# mounted base (docs/BUILD.md step 2); STOCK_TREE overrides where.
+#
+# Run tools/fetch-sources.sh pipewire-lv2 to populate sources/.
+
+cd $(dirname $0) ; CWD=$(pwd)
+
+PRGNAM=pipewire            # deliberately replaces the stock package
+SRCNAM=pipewire
+VERSION=${VERSION:-1.6.6}
+BUILD=${BUILD:-2}          # bumped: distinguishes our rebuild from Slackware's
+TAG=${TAG:-_mac}
+
+if [ -z "$ARCH" ]; then
+  ARCH=$( uname -m )
+fi
+
+if [ ! -z "${PRINT_PACKAGE_NAME}" ]; then
+  echo "$PRGNAM-$VERSION-$ARCH-$BUILD$TAG.txz"
+  exit 0
+fi
+
+NUMJOBS=${NUMJOBS:-"-j$(nproc)"}
+
+TMP=${TMP:-/tmp/mac}
+PKG=$TMP/package-$PRGNAM
+OUTPUT=${OUTPUT:-/tmp}
+
+if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "x86_64" ]; then
+  LIBDIRSUFFIX="64"
+else
+  LIBDIRSUFFIX=""
+fi
+SLKCFLAGS="-O2 -fPIC"
+
+set -e
+
+# THE REFERENCE IS THE BASE'S PACKAGE, NOT WHAT IS INSTALLED HERE.
+#
+# On a build host installed from this port's own medium, /var/log/packages
+# holds THIS package from the last build, so comparing against it proves only
+# that the build matches itself. Read the stock package off the pinned base,
+# which docs/BUILD.md step 2 mounts (sha256-verified) for the whole build.
+STOCK_TREE=${STOCK_TREE:-/mnt/iso/slackware/slackwareaarch64-current/slackware}
+STOCK_PKG=$(ls $STOCK_TREE/l/$PRGNAM-[0-9]*.txz 2>/dev/null | grep -v '_mac\.txz$' | head -1)
+[ -n "$STOCK_PKG" ] || {
+  echo "$PRGNAM: no stock pipewire package under $STOCK_TREE/l." >&2
+  echo "  Mount the pinned base at /mnt/iso (docs/BUILD.md step 2); the parity" >&2
+  echo "  check compares this build with that package." >&2
+  exit 1; }
+# Refuse to build blind against a different stock version: a mismatch means our
+# package would be an unintended upgrade or downgrade of a core component.
+STOCKVER=$(basename "$STOCK_PKG" | sed -E 's/^pipewire-([0-9][^-]*)-.*/\1/')
+if [ "$STOCKVER" != "$VERSION" ]; then
+  echo "$PRGNAM: the base's pipewire is $STOCKVER but this builds $VERSION." >&2
+  echo "  Rebuilding would change the version of a core package." >&2
+  echo "  Set VERSION=$STOCKVER and fetch the matching source." >&2
+  exit 1
+fi
+
+# lilv is the whole point; without it -Dlv2=enabled fails at configure time
+# anyway, but say so clearly here.
+pkg-config --exists lilv-0 || {
+  echo "$PRGNAM: lilv not found -- build and install the LV2 stack first" >&2
+  echo "  (zix, serd, sord, lv2, sratom, lilv)" >&2
+  exit 1
+}
+
+rm -rf $PKG
+mkdir -p $TMP $PKG $OUTPUT
+cd $TMP
+rm -rf $SRCNAM-$VERSION
+tar xf $CWD/sources/$SRCNAM-$VERSION.tar.gz
+cd $SRCNAM-$VERSION
+
+chown -R root:root .
+find . \( -type f -o -type d \) \
+ \( \( -perm 777 -o -perm 775 -o -perm 711 -o -perm 555 -o -perm 511 \) \
+ -exec chmod 755 {} \+ -o \
+ \( -perm 666 -o -perm 664 -o -perm 600 -o -perm 444 -o -perm 440 -o -perm 400 \) \
+ -exec chmod 644 {} \+ \)
+
+export CFLAGS="$SLKCFLAGS"
+export CXXFLAGS="$SLKCFLAGS"
+
+# Flags below reproduce the base's package (see RELATIONSHIP above), plus
+# -Dlv2=enabled. JACK is off: the base's package has no pw-jack, no libjack
+# replacement and no SPA JACK plugin. The pulseaudio gsettings schema is off:
+# pulseaudio ships that file, and the base's pipewire does not.
+mkdir meson-build
+cd meson-build
+meson setup \
+  --prefix=/usr \
+  --libdir=lib${LIBDIRSUFFIX} \
+  --libexecdir=/usr/libexec \
+  --bindir=/usr/bin \
+  --sbindir=/usr/sbin \
+  --includedir=/usr/include \
+  --datadir=/usr/share \
+  --mandir=/usr/man \
+  --sysconfdir=/etc \
+  --localstatedir=/var \
+  --buildtype=release \
+  -Dman=enabled \
+  -Dudevrulesdir=/lib/udev/rules.d \
+  -Dffmpeg=enabled \
+  -Dvulkan=enabled \
+  -Dpipewire-jack=disabled \
+  -Djack=disabled \
+  -Dgsettings-pulse-schema=disabled \
+  -Dsession-managers=[] \
+  -Dlv2=enabled \
+  ..
+
+# Confirm meson actually resolved LV2 to enabled before spending the build time.
+if ! meson configure 2>/dev/null | grep -E '^\s*lv2' | grep -q enabled; then
+  echo "$PRGNAM: meson did not enable lv2 -- aborting rather than shipping" >&2
+  echo "  another PipeWire that cannot load LV2 plugins." >&2
+  meson configure 2>/dev/null | grep -E '^\s*lv2' | sed 's/^/    /' >&2 || true
+  exit 1
+fi
+
+ninja $NUMJOBS
+DESTDIR=$PKG ninja install
+cd ..
+
+# Slackware's pipewire.SlackBuild, verbatim:
+# Create system config file override directory:
+mkdir -p $PKG/etc/pipewire
+
+# Verify LV2 support actually landed.
+#
+# NOTE: in PipeWire 1.6.x, LV2 is NOT linked into
+# libpipewire-module-filter-chain.so. It is built as a separate, dynamically
+# loaded SPA filter-graph backend:
+#     usr/lib*/spa-0.2/filter-graph/libspa-filter-graph-plugin-lv2.so
+# Checking filter-chain for a lilv link therefore gives a FALSE NEGATIVE. Check
+# the real artifact.
+LV2PLUG=$PKG/usr/lib${LIBDIRSUFFIX}/spa-0.2/filter-graph/libspa-filter-graph-plugin-lv2.so
+if [ ! -f "$LV2PLUG" ]; then
+  echo "$PRGNAM: LV2 filter-graph plugin not built -- LV2 support missing" >&2
+  echo "  expected: $LV2PLUG" >&2
+  exit 1
+fi
+if ldd "$LV2PLUG" 2>/dev/null | grep -qi lilv; then
+  echo "$PRGNAM: LV2 filter-graph plugin present and links lilv -- LV2 support OK"
+else
+  echo "$PRGNAM: LV2 plugin built but does not link lilv" >&2
+  exit 1
+fi
+
+find $PKG -type f \( -perm -0100 -o -name '*.so*' \) -print0 2>/dev/null \
+  | xargs -0r file 2>/dev/null | grep -E 'ELF.*(executable|shared object)' \
+  | cut -f1 -d: | xargs -r strip --strip-unneeded 2>/dev/null || true
+
+# Compress man pages the Slackware way.
+if [ -d $PKG/usr/man ]; then
+  find $PKG/usr/man -type f -name '*.[0-9]' -exec gzip -9 {} \; 2>/dev/null || true
+fi
+
+# The same documentation set the base's package carries.
+mkdir -p $PKG/usr/doc/$PRGNAM-$VERSION
+cp -a CODE_OF_CONDUCT* COPYING* INSTALL* LICENSE* NEWS* PROTOCOL* README* \
+  $PKG/usr/doc/$PRGNAM-$VERSION 2>/dev/null || true
+cat $CWD/$PRGNAM-lv2.SlackBuild > $PKG/usr/doc/$PRGNAM-$VERSION/$PRGNAM.SlackBuild 2>/dev/null \
+  || cat $CWD/pipewire-lv2.SlackBuild > $PKG/usr/doc/$PRGNAM-$VERSION/$PRGNAM.SlackBuild
+
+# ---------------------------------------------------------------------------
+# PARITY WITH THE BASE'S PACKAGE, BOTH WAYS.
+#
+# Missing: upgradepkg deletes files the old package had and the new one does
+# not, so a stock path absent here vanishes from the running system. Extra: a
+# file stock does not ship is a change nobody reviewed, and if another package
+# owns it, a collision.
+#
+# Files, directories and symlinks, both sides. makepkg moves symlinks into
+# install/doinst.sh, so a tar listing never shows them: stock's are read from
+# its doinst.sh, ours from the tree, each as "path -> target". Directories
+# count because stock ships an empty one, /etc/pipewire, for local overrides,
+# which a file-only comparison once let this package drop.
+#
+# The allowed differences are exactly the LV2 backend this package exists for,
+# this script's own copy, and the four files the header explains, with the
+# three directories that hold nothing else.
+# ---------------------------------------------------------------------------
+OURS_ONLY_OK="usr/lib${LIBDIRSUFFIX}/spa-0.2/filter-graph/libspa-filter-graph-plugin-lv2.so
+usr/doc/$PRGNAM-$VERSION/$PRGNAM.SlackBuild"
+STOCK_ONLY_OK="etc/xdg/autostart/pipewire.desktop.sample
+etc/xdg/autostart/pipewire-pulse.desktop.sample
+usr/sbin/pipewire-enable.sh
+usr/sbin/pipewire-disable.sh
+etc/xdg/
+etc/xdg/autostart/
+usr/sbin/"
+# Beyond symlinks, stock's doinst.sh does exactly this, which the exception
+# above leaves with nothing to do. If a re-pinned base's does more, that logic
+# has to be ported here, so it fails the check.
+STOCK_LOGIC_OK='for file in pipewire.desktop pipewire-pulse.desktop ; do
+  cmp -s etc/xdg/autostart/${file} etc/xdg/autostart/${file}.sample && rm etc/xdg/autostart/${file}.sample
+done'
+_doinst=$(mktemp); _stock=$(mktemp); _ours=$(mktemp)
+tar xJOf "$STOCK_PKG" install/doinst.sh > "$_doinst" 2>/dev/null \
+  && grep -q ' ; ln -sf ' "$_doinst" \
+  || { echo "$PRGNAM: cannot read the symlinks in $(basename "$STOCK_PKG")'s doinst.sh" >&2
+       rm -f "$_doinst" "$_stock" "$_ours"; exit 1; }
+{ tar tJf "$STOCK_PKG" | grep -vE '^(\./|install/)'
+  sed -nE 's|^\( cd ([^ ]+) ; ln -sf ([^ ]+) ([^ ]+) \)$|\1/\3 -> \2|p' "$_doinst"
+} | sort > "$_stock"
+( cd $PKG && find . -mindepth 1 \( -type d -printf '%P/\n' -o -type f -printf '%P\n' \
+    -o -type l -printf '%P -> %l\n' \) | grep -v '^install/' | sort ) > "$_ours"
+_extra=$(comm -13 "$_stock" "$_ours" | grep -vxF "$OURS_ONLY_OK" || true)
+_missing=$(comm -23 "$_stock" "$_ours" | grep -vxF "$STOCK_ONLY_OK" || true)
+_logic=$(grep -vE '^\( cd [^ ]+ ; (rm -rf [^ ]+|ln -sf [^ ]+ [^ ]+) \)$' "$_doinst" \
+  | grep -vE '^[[:space:]]*(#|$)' || true)
+rm -f "$_doinst" "$_stock" "$_ours"
+if [ -n "$_extra" ] || [ -n "$_missing" ]; then
+  echo "$PRGNAM: this build is not the base's package plus LV2." >&2
+  if [ -n "$_missing" ]; then
+    echo "  in $(basename "$STOCK_PKG"), missing here:" >&2
+    echo "$_missing" | head -30 | sed 's/^/    /' >&2
+  fi
+  if [ -n "$_extra" ]; then
+    echo "  here, not in $(basename "$STOCK_PKG"):" >&2
+    echo "$_extra" | head -30 | sed 's/^/    /' >&2
+  fi
+  exit 1
+fi
+if [ "$_logic" != "$STOCK_LOGIC_OK" ]; then
+  echo "$PRGNAM: $(basename "$STOCK_PKG")'s doinst.sh does more than this script expects:" >&2
+  echo "$_logic" | sed 's/^/    /' >&2
+  echo "  Port it here, or document why not. Refusing to package." >&2
+  exit 1
+fi
+echo "$PRGNAM: parity OK; $(basename "$STOCK_PKG") plus LV2, minus the enable/disable scripts"
+
+mkdir -p $PKG/install
+cat $CWD/slack-desc > $PKG/install/slack-desc
+
+cd $PKG
+/sbin/makepkg -l y -c n $OUTPUT/$PRGNAM-$VERSION-$ARCH-$BUILD$TAG.txz

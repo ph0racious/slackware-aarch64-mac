@@ -1,0 +1,108 @@
+#!/bin/bash
+
+# Slackware build script for triforce (LV2 microphone beamformer)
+
+# Copyright 2026  Jim Phoenix, Earth, Milky Way
+# All rights reserved.
+#
+# Redistribution and use of this script, with or without modification, is
+# permitted provided that the following conditions are met:
+#
+# 1. Redistributions of this script must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+#
+#  THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR IMPLIED
+#  WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+#  MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO
+#  EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+#  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+#  PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+#  OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+#  WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+#  OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+#  ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+# WHY: triforce is an adaptive (MVDR) beamformer for the microphone array in
+# Apple Silicon laptops; upstream's README calls the array "far too sensitive
+# and omnidirectional to be at all useful" without one. asahi-audio loads it in
+# the laptops' mic.json filter chains only. The speaker graphs do not use it.
+#
+# NAMING: the crate is 'triforce-lv2' but the upstream repo and tarball are
+# 'triforce'. The package takes the crate's name; SRCNAM tracks the tarball.
+#
+# LV2 PATH: upstream defaults to LIBDIR ?= $(PREFIX)/lib64 -- correct here, but
+# passed explicitly so a change upstream cannot silently misplace the bundle.
+#
+# RUST: no rust-toolchain.toml, so the system rustc is used (same as the kernel
+# and speakersafetyd). Its crate dependencies come from crates.io, so the build
+# needs network access -- it is NOT an offline build.
+#
+# Run tools/fetch-sources.sh triforce-lv2 to populate sources/.
+
+cd $(dirname $0) ; CWD=$(pwd)
+
+PRGNAM=triforce-lv2
+SRCNAM=triforce
+VERSION=${VERSION:-0.3.2}
+BUILD=${BUILD:-1}
+TAG=${TAG:-_mac}
+
+if [ -z "$ARCH" ]; then
+  ARCH=$( uname -m )
+fi
+
+if [ ! -z "${PRINT_PACKAGE_NAME}" ]; then
+  echo "$PRGNAM-$VERSION-$ARCH-$BUILD$TAG.txz"
+  exit 0
+fi
+
+TMP=${TMP:-/tmp/mac}
+PKG=$TMP/package-$PRGNAM
+OUTPUT=${OUTPUT:-/tmp}
+
+if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "x86_64" ]; then
+  LIBDIRSUFFIX="64"
+else
+  LIBDIRSUFFIX=""
+fi
+
+set -e
+
+rm -rf $PKG
+mkdir -p $TMP $PKG $OUTPUT
+cd $TMP
+rm -rf $SRCNAM-$VERSION
+tar xf $CWD/sources/$SRCNAM-$VERSION.tar.gz
+cd $SRCNAM-$VERSION
+
+chown -R root:root .
+find . \( -type f -o -type d \) \
+ \( \( -perm 777 -o -perm 775 -o -perm 711 -o -perm 555 -o -perm 511 \) \
+ -exec chmod 755 {} \+ -o \
+ \( -perm 666 -o -perm 664 -o -perm 600 -o -perm 444 -o -perm 440 -o -perm 400 \) \
+ -exec chmod 644 {} \+ \)
+
+export RUSTFLAGS="-C opt-level=3"
+
+cargo build --release --locked
+
+make install DESTDIR=$PKG PREFIX=/usr LIBDIR=/usr/lib${LIBDIRSUFFIX}
+
+BUNDLE=$PKG/usr/lib${LIBDIRSUFFIX}/lv2/$SRCNAM.lv2
+for f in $SRCNAM.so manifest.ttl $SRCNAM.ttl; do
+  [ -f "$BUNDLE/$f" ] || { echo "$PRGNAM: missing $f in LV2 bundle" >&2; exit 1; }
+done
+echo "$PRGNAM: LV2 bundle complete at /usr/lib${LIBDIRSUFFIX}/lv2/$SRCNAM.lv2"
+
+find $PKG -type f -name '*.so' -print0 \
+  | xargs -0r strip --strip-unneeded 2>/dev/null || true
+
+mkdir -p $PKG/usr/doc/$PRGNAM-$VERSION
+cp -a LICEN[CS]E* README* $PKG/usr/doc/$PRGNAM-$VERSION 2>/dev/null || true
+cat $CWD/$PRGNAM.SlackBuild > $PKG/usr/doc/$PRGNAM-$VERSION/$PRGNAM.SlackBuild
+
+mkdir -p $PKG/install
+cat $CWD/slack-desc > $PKG/install/slack-desc
+
+cd $PKG
+/sbin/makepkg -l y -c n $OUTPUT/$PRGNAM-$VERSION-$ARCH-$BUILD$TAG.txz

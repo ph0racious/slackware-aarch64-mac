@@ -1,0 +1,602 @@
+#!/bin/bash
+#
+# Copyright 2026  Jim Phoenix, Earth, Milky Way.  Modified BSD terms:
+# redistributions must retain this notice.  Full text in LICENSE at the
+# slackware-aarch64-mac tree root.
+#
+# vendorfw-install-mac -- put Apple's vendor firmware (Wi-Fi, Bluetooth, webcam,
+# multitouch) where the kernel can find it, on an installed Slackware system.
+#
+# WHY THIS EXISTS
+# ---------------
+# The Asahi installer leaves extracted vendor firmware on the ESP at
+# /boot/efi/vendorfw/firmware.cpio, but nothing on a Slackware system ever puts
+# it into a kernel firmware search path.  Fedora Asahi does it from an initramfs
+# hook; this port's GRUB entry deliberately carries no initrd, so that hook
+# does not exist here.  Without this step brcmfmac and hci_bcm4377 both fail
+# with -2 and there is no Wi-Fi and no Bluetooth.
+#
+# WHERE IT INSTALLS, AND WHY
+# --------------------------
+# /lib/firmware/updates -- a standard kernel search path, consulted BEFORE
+# /lib/firmware.  That means:
+#   * no firmware_class.path= on the kernel command line;
+#   * no collision with Slackware's own kernel-firmware package, which owns
+#     /lib/firmware/brcm;
+#   * removing this directory (--remove) reverts the firmware completely. A
+#     regulatory domain set with --regdom is separate and stays, in
+#     /etc/modprobe.d/cfg80211.conf.
+#
+# THE STALENESS TRAP
+# ------------------
+# The Asahi installer builds the ESP copy from the IPSW of the macOS version it
+# pins for its stub (13.5 on an M2 Mac mini), never from the macOS you run, so
+# its Wi-Fi firmware is that version's however current macOS is.
+#
+# `asahi-fwupdate` does NOT change this: it re-extracts from the same tarball,
+# and re-running the Asahi installer pins the same version.  To refresh Wi-Fi
+# and Bluetooth, run macos-fw-harvest.sh from the installation medium in macOS,
+# then run this again.
+#
+# NEWER IS NOT AUTOMATICALLY BETTER.  brcmfmac only accepts bss_info struct
+# versions 109..112; macOS Tahoe (26.x) ships firmware reporting 116, which the
+# driver rejects outright and every scan returns nothing.  This tree carries a
+# patch raising that ceiling; a stock kernel does not.  If you refresh firmware
+# from a recent macOS and Wi-Fi goes completely silent, look for
+# "BSS info version ... unsupported" in dmesg.
+#
+# WHERE THE FIRMWARE COMES FROM
+# -----------------------------
+# Everything comes from the Asahi installer's copy on the ESP, EXCEPT Wi-Fi and
+# Bluetooth (brcm/), which come from /boot/efi/asahi/all_firmware-live.tar.gz
+# when that exists -- firmware captured from a LIVE macOS by
+# macos-fw-harvest.sh, used automatically and without asking. If the capture
+# turns out to be unusable, Wi-Fi and Bluetooth fall back to the ESP copy, when
+# there is one, rather than failing.
+#
+# Only Wi-Fi and Bluetooth are taken live: that is where a newer macOS has been
+# shown to matter, and where this tree carries the matching driver fix.
+# Multitouch (keyboard, trackpad, Touch Bar), webcam and the kernelcache
+# firmware stay at the version upstream pins.
+#
+# Usage:
+#   vendorfw-install-mac                 install (see above)
+#   vendorfw-install-mac --regdom=AU     also set the regulatory domain
+#   vendorfw-install-mac --regdom=auto   guess it from the system timezone
+#   vendorfw-install-mac --remove        undo -- delete /lib/firmware/updates
+#   vendorfw-install-mac --check         report what is installed, change nothing
+
+set -uo pipefail
+
+DEST=/lib/firmware/updates
+# Which source the installed firmware came from, so --check can say so later.
+SRC_STAMP=/var/lib/vendorfw-source-mac
+ESP_FW=/boot/efi/vendorfw
+# Firmware captured from a live macOS by macos-fw-harvest.sh. Deliberately a
+# DIFFERENT filename from upstream's all_firmware.tar.gz: writing a separate
+# file means a bad capture can never damage the archive asahi-fwupdate and the
+# stock tooling depend on, and "should we use it?" reduces to "does it exist?".
+LIVE_FW=/boot/efi/asahi/all_firmware-live.tar.gz
+REGDOM=""
+MODE=install
+
+for a in "$@"; do
+  case "$a" in
+    --regdom=*) REGDOM="${a#*=}" ;;
+    --remove)   MODE=remove ;;
+    --check)    MODE=check ;;
+    -h|--help)  sed -n '2,/^set -uo pipefail$/p' "$0" | sed '$d; s/^# \?//'; exit 0 ;;
+    *) echo "vendorfw-install-mac: unknown argument: $a (try --help)" >&2; exit 2 ;;
+  esac
+done
+
+die()  { echo "vendorfw-install-mac: $*" >&2; exit 1; }
+info() { echo "  $*"; }
+
+# THE FIRMWARE'S OWN BUILD DATE -- NOT THE FILE'S MTIME.
+#
+# Neither timestamp on disk tells you anything true. Files extracted from a
+# vendorfw cpio carry a ZEROED mtime (1970), and the ESP copy is stamped with
+# the moment the Asahi installer ran. The only honest indicator is the build
+# date compiled into the blob itself, which brcmfmac also prints at load:
+#
+#   Firmware: BCM4388/4 wl0: Jun 11 2023 06:02:28 version 23.20.95.0.40.50.92
+#
+# This is worth surfacing because stale firmware does not fail cleanly, and its
+# symptoms read as broken hardware or a driver bug. Printing one dated line
+# turns an invisible property into a visible one.
+fw_build_date() {
+  grep -aoE '[A-Z][a-z][a-z] +[0-9]+ [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2}' \
+    "$1" 2>/dev/null | head -1
+}
+
+# PICK THE BLOB FOR *THIS* CHIP. "ANY BLOB" IS WRONG, TWICE OVER.
+#
+# Taking the alphabetically first brcmfmac*.bin reports "unknown" on perfectly
+# good firmware sets, because in the Asahi installer's copy that file is
+# brcmfmac4355c1-pcie.apple,hawaii.bin -- an old chip whose firmware carries no
+# build date at all.
+#
+# The obvious repair -- "first blob that has a date" -- is also wrong. A vendor
+# tree holds firmware for every Mac, and an old chip's blob can legitimately be
+# years older than the tree it ships in. Sampling it would report a scary age
+# for a current install.
+#
+# So resolve the chip the machine actually uses. brcmfmac announces the base
+# name it settled on:
+#   brcmf_fw_alloc_request: using brcm/brcmfmac4388c0-pcie for chip BCM4388/4
+# and that is precisely the filename prefix wanted. Board variants of one chip
+# are largely hardlinks to each other, so any of them dates the chip correctly.
+# Prints "KIND PATH" on one line so the caller can say what it is looking at:
+#   chip         this machine's chip, with a date
+#   chip-nodate  this machine's chip, no build date in the blob
+#   any          some other chip's blob -- dates the tree, not this machine
+#
+# The kind is RETURNED, not assigned to a global: every caller reads this
+# function through `$( )`, so an assignment would happen in a subshell and never
+# reach them. Under `set -u` the caller's variable would then be fatally unbound
+# on exactly the path where no driver has loaded yet -- the installer -- which
+# no run on a booted machine exercises.
+fw_sample_blob() {
+  _base=$(dmesg 2>/dev/null \
+    | sed -nE 's|.*brcmf_fw_alloc_request: using brcm/([^ ]+) for chip.*|\1|p' \
+    | tail -1)
+  if [ -n "$_base" ]; then
+    for _f in "$1"/brcm/"$_base".*.bin; do
+      [ -f "$_f" ] || continue
+      [ -n "$(fw_build_date "$_f")" ] || continue
+      echo "chip $_f"; return 0
+    done
+    # The chip is known and its blobs are here, but none carries a build
+    # date -- some of Apple's firmware does not. Report THAT. Reaching
+    # past it to another chip's file would date this machine's firmware by some
+    # other chip's blob.
+    for _f in "$1"/brcm/"$_base".*.bin; do
+      [ -f "$_f" ] || continue
+      echo "chip-nodate $_f"; return 0
+    done
+  fi
+  # No driver loaded yet -- the installer's case, where the target's modules
+  # have never run. Any blob with a date at least dates the tree; the caller
+  # must say that is what it is.
+  for _f in "$1"/brcm/brcmfmac*.bin; do
+    [ -f "$_f" ] || continue
+    [ -n "$(fw_build_date "$_f")" ] || continue
+    echo "any $_f"; return 0
+  done
+}
+
+# The running driver is the authority when there is one: it prints the date of
+# the firmware it actually loaded, which is the only thing that answers "what
+# is this machine running".
+fw_running_date() {
+  dmesg 2>/dev/null \
+    | sed -nE 's|.*wl0: ([A-Z][a-z][a-z] +[0-9]+ [0-9]{4} [0-9:]+) version .*|\1|p' \
+    | tail -1
+}
+
+# Report the vintage, and say so plainly when it is old. The threshold is
+# deliberately generous -- this warns about a genuinely aged blob, not about
+# being a few months behind.
+fw_report_age() {
+  _run=$(fw_running_date)
+  _sample=$(fw_sample_blob "$1")
+  _kind=${_sample%% *}
+  _blob=${_sample#* }
+  [ -n "$_sample" ] || { _kind=""; _blob=""; }
+  if [ -n "$_run" ]; then
+    # Name where the claim comes from. Which thing was sampled is part of the
+    # claim, not decoration -- it is what makes the number checkable.
+    info "firmware build date: $_run   [as loaded by the running driver]"
+    _date=$_run
+  elif [ -z "$_blob" ]; then
+    info "firmware build date: unknown -- no brcmfmac blob found under $1/brcm"
+    return 0
+  elif [ "$_kind" = chip-nodate ]; then
+    info "firmware build date: not stated -- $(basename "$_blob") carries no"
+    info "  build date, which some of Apple's firmware does not. Load the"
+    info "  driver and re-run --check to see what it actually reports."
+    return 0
+  elif [ "$_kind" = any ]; then
+    info "firmware build date: $(fw_build_date "$_blob")   [$(basename "$_blob")]"
+    info "  ⚠ that blob belongs to ANOTHER chip -- this machine's chip is not"
+    info "  known here (no driver loaded yet), so it dates the firmware tree,"
+    info "  NOT this machine. Do not read an age into it."
+    return 0
+  else
+    _date=$(fw_build_date "$_blob")
+    info "firmware build date: $_date   [$(basename "$_blob")]"
+  fi
+  _year=$(echo "$_date" | awk '{print $3}')
+  _now=$(date +%Y)
+  case "$_year" in
+    [0-9][0-9][0-9][0-9]) ;;
+    *) return 0 ;;
+  esac
+  _age=$((_now - _year))
+  [ "$_age" -ge 2 ] || return 0
+  info "firmware age: about $_age years"
+}
+
+# DERIVE THE REGULATORY DOMAIN FROM THE TIMEZONE.
+#
+# `--regdom=auto` lets the installer make the same best guess other software
+# makes, rather than leaving the card on world domain "00" where most 5 GHz
+# channels are flagged No-IR and stay unusable until some access point's country
+# IE happens to correct it.
+#
+# /etc/localtime is a symlink into the zoneinfo tree, and zone.tab maps a zone
+# to an ISO country code -- TAB separated, country in field 1, zone in field 3:
+#
+#   AU<TAB>-3352+15113<TAB>Australia/Sydney<TAB>New South Wales (most areas)
+#
+# zone.tab is used deliberately in preference to zone1970.tab, which lists
+# SEVERAL countries per zone (Europe/Zurich covers CH, DE and LI) and so puts
+# back the exact ambiguity this is meant to remove.
+#
+# A guess that cannot be made is NOT an error. A missing symlink, UTC, Etc/* or
+# an unmapped zone all leave the domain unset, and the caller says so: a wrong
+# country is worse than no country, and the user can always pass --regdom=XX.
+regdom_from_timezone() {
+  _link=$(readlink -f /etc/localtime 2>/dev/null) || return 0
+  case "$_link" in
+    */zoneinfo/*) _zone=${_link##*/zoneinfo/} ;;
+    *)            return 0 ;;
+  esac
+  case "$_zone" in
+    ""|UTC|Etc/*|posix/*|right/*) return 0 ;;
+  esac
+  _tab=/usr/share/zoneinfo/zone.tab
+  [ -r "$_tab" ] || return 0
+  awk -F '\t' -v z="$_zone" '$1 !~ /^#/ && $3 == z { print $1; exit }' \
+    "$_tab" 2>/dev/null
+}
+
+[ "$(id -u)" = 0 ] || die "must be root"
+
+# VALIDATE EVERYTHING BEFORE TOUCHING ANYTHING.
+#
+# Checked last, `--regdom=AUS` would perform a full install from the ESP --
+# silently replacing good firmware with the stale copy -- and only then complain
+# about the country code. Arguments are cheap to check; check them while nothing
+# has happened yet.
+if [ "$REGDOM" = auto ]; then
+  REGDOM=$(regdom_from_timezone)
+  if [ -n "$REGDOM" ]; then
+    info "regulatory domain: guessed **$REGDOM** from the system timezone"
+  else
+    # Say so out loud. A silent non-decision is the thing that later reads as
+    # "the Wi-Fi is broken" when it is really "the country was never set".
+    info "regulatory domain: could not be guessed from the timezone -- leaving"
+    info "  it unset. If channels look restricted, set it explicitly with:"
+    info "      $0 --regdom=XX"
+  fi
+fi
+if [ -n "$REGDOM" ]; then
+  case "$REGDOM" in
+    [A-Z][A-Z]) ;;
+    *) die "--regdom must be a two-letter ISO country code (e.g. AU), or 'auto' to derive it from the timezone; got '$REGDOM'" ;;
+  esac
+fi
+
+# ---- check ----------------------------------------------------------------
+if [ "$MODE" = check ]; then
+  if [ -d "$DEST" ]; then
+    info "installed: $(find "$DEST" -type f | wc -l) files in $DEST"
+    info "  wifi (brcmfmac): $(ls "$DEST/brcm" 2>/dev/null | grep -c '^brcmfmac')"
+    info "  bt   (brcmbt)  : $(ls "$DEST/brcm" 2>/dev/null | grep -c '^brcmbt')"
+    info "  other          : $(find "$DEST" -type f ! -path "$DEST/brcm/*" | wc -l) (webcam, multitouch, ...)"
+    # WHICH SOURCE THIS CAME FROM. Without it, "old firmware" and "the good
+    # firmware failed to extract and we fell back" look identical here.
+    if [ -s "$SRC_STAMP" ]; then
+      info "  source         : $(sed -n '1p' "$SRC_STAMP")"
+      info "  installed      : $(sed -n '2p' "$SRC_STAMP")"
+    else
+      info "  source         : unrecorded"
+    fi
+    echo
+    fw_report_age "$DEST"
+  else
+    info "nothing installed at $DEST"
+  fi
+  echo
+  info "firmware the running kernel actually loaded:"
+  dmesg 2>/dev/null | grep -oE 'BCM[0-9]+/[0-9]+ wl0:.*' | tail -1 | sed 's/^/    wifi: /'
+  # Not `dmesg | grep -q`. The failure is logged at probe, early, with a whole
+  # boot log after it: grep -q exits on the match, dmesg takes SIGPIPE, and
+  # pipefail turns the match into a failure -- reporting the device as up.
+  # Process substitution leaves grep's own status as the verdict.
+  grep -qE 'hci_bcm4377.*Failed to load firmware' <(dmesg 2>/dev/null) \
+    && echo "    bt  : FAILED to load" \
+    || echo "    bt  : $(hciconfig 2>/dev/null | grep -c 'UP RUNNING') device(s) up"
+  echo
+  info "regulatory domain: $(iw reg get 2>/dev/null | awk '/^country/{sub(/:$/, "", $2); print $2; exit}')"
+  [ -e /etc/modprobe.d/cfg80211.conf ] && info "  persisted in /etc/modprobe.d/cfg80211.conf"
+  exit 0
+fi
+
+# ---- remove ---------------------------------------------------------------
+if [ "$MODE" = remove ]; then
+  [ -d "$DEST" ] || die "$DEST is not present -- nothing to remove"
+  n=$(find "$DEST" -type f | wc -l)
+  rm -rf "$DEST"
+  info "removed $DEST ($n files)"
+  info "reload the drivers or reboot to fall back to whatever else is on the system"
+  exit 0
+fi
+
+# ---- gather, verify, merge ------------------------------------------------
+STAGE=$(mktemp -d) || die "cannot create a scratch directory"
+trap 'rm -rf "$STAGE"' EXIT
+
+# Extract a macOS firmware tree (<dir>/wifi, <dir>/bluetooth) into a vendorfw
+# cpio, echoing the cpio path.
+#
+# RETURNS non-zero instead of dying: it runs UNATTENDED during setup and must
+# degrade to the installer's own copy rather than leave a machine with no
+# firmware at all.
+# Progress goes to stderr so it cannot contaminate the echoed path.
+# WHY THIS REPORTS INSTEAD OF JUST FAILING.
+#
+# When this returns non-zero, Wi-Fi and Bluetooth fall back to the Asahi
+# installer's copy, when there is one. That trade is only defensible if the
+# reason is on the record, and the reason has to distinguish "your capture is
+# no good" from "our extractor broke" -- they send you to opposite ends of the
+# problem. The reason is written to $_out/why for the caller to print, and the
+# extractor's own output is kept at $KEEP_LOG rather than dying with $STAGE.
+KEEP_LOG=/var/log/vendorfw-extract-mac.log
+
+extract_from_tree() {
+  _tree=$1
+  _out=$2
+  mkdir -p "$_out"
+  _why="$_out/why"; : > "$_why"
+  command -v python3 >/dev/null 2>&1 || {
+    echo "python3 is not installed, so nothing can be extracted" > "$_why"; return 1; }
+  python3 -c 'import asahi_firmware' 2>/dev/null || {
+    echo "the asahi_firmware module is missing (install the asahi-fwextract package)" > "$_why"
+    return 1; }
+
+  # asahi-fwextract 0.7.9 cannot parse Apple's newer *_gen* files: the '_gen'
+  # token contains no '-', so wifi.py's `k, v = i.split("-", 1)` raises
+  # ValueError and the whole extraction dies.  Upstream skips them too, from
+  # v0.9.0 on ("It's not clear how they are used"), so work from a copy
+  # without them.
+  _work="$_out/src"
+  mkdir -p "$_work"
+  cp -a "$_tree/." "$_work/" 2>/dev/null
+  _cand=$(find "$_work" \( -name '*.trx' -o -name '*.txt' -o -name '*.clmb' \
+                        -o -name '*.txcb' -o -name '*.sig' \) 2>/dev/null | wc -l)
+  _ngen=$(find "$_work" -name '*_gen*' 2>/dev/null | wc -l)
+  if [ "$_ngen" -gt 0 ]; then
+    find "$_work" -name '*_gen*' -delete
+    info "skipped $_ngen *_gen* file(s) -- asahi-fwextract 0.7.9 cannot parse them" >&2
+  fi
+  if [ ! -d "$_work/wifi" ]; then
+    echo "the tree at $_tree holds no wifi/ directory -- it is not a macOS firmware tree" > "$_why"
+    return 1
+  fi
+  _chips=$(find "$_work/wifi" -maxdepth 1 -type d -name 'C-*' 2>/dev/null | wc -l)
+
+  _outd="$_out/out"; mkdir -p "$_outd"
+  _log="$_out/extract.log"
+  # bluetooth.py's __main__ does `from . import FWPackage`, but FWPackage lives
+  # in core.py -- so `python3 -m asahi_firmware.bluetooth` fails as soon as it
+  # is asked to package what it reads.
+  # Drive the library directly instead of relying on either module's __main__.
+  if ! python3 - "$_work" "$_outd" > "$_log" 2>&1 <<'PY'
+import sys, os
+from asahi_firmware.core import FWPackage
+src, dest = sys.argv[1], sys.argv[2]
+pkg = FWPackage(dest)
+n = 0
+w = os.path.join(src, "wifi")
+if os.path.isdir(w):
+    from asahi_firmware.wifi import WiFiFWCollection
+    f = sorted(WiFiFWCollection(w).files()); pkg.add_files(f); n += len(f)
+    print(f"  wifi: {len(f)} files")
+b = os.path.join(src, "bluetooth")
+if os.path.isdir(b):
+    from asahi_firmware.bluetooth import BluetoothFWCollection
+    f = sorted(BluetoothFWCollection(b).files()); pkg.add_files(f); n += len(f)
+    print(f"  bluetooth: {len(f)} files")
+pkg.close()
+print(f"TOTAL {n}")
+if not n:
+    sys.exit("no firmware found -- does the source hold wifi/ and bluetooth/ ?")
+PY
+  then
+    # THE FIRMWARE IS NOT ON TRIAL HERE, THE EXTRACTOR IS. Name it, name the
+    # exception, name the tree it was reading, and say how much was in that
+    # tree -- a full tree and a crash means the tool, not the capture.
+    cp -f "$_log" "$KEEP_LOG" 2>/dev/null
+    _exc=$(grep -aE '^[A-Za-z_][A-Za-z_.]*(Error|Exception)' "$_log" | tail -1)
+    _at=$(grep -aE '^  File "' "$_log" | tail -1 | sed 's/^  */    /')
+    {
+      echo "asahi-fwextract FAILED while reading $_work"
+      [ -n "$_exc" ] && echo "    ${_exc:-(no exception line)}"
+      [ -n "$_at" ] && echo "$_at"
+      echo "    that tree held $_cand firmware file(s) in $_chips chip directories,"
+      echo "    so the archive is intact -- this is the extractor, not the capture."
+      echo "    full output kept at $KEEP_LOG"
+    } > "$_why"
+    return 1
+  fi
+  cat "$_log" >&2
+
+  _n=$(sed -n 's/^TOTAL \([0-9]*\)$/\1/p' "$_log" | tail -1)
+  _cpio=$(ls "$_outd"/*.cpio 2>/dev/null | head -1)
+  if [ -z "$_cpio" ]; then
+    cp -f "$_log" "$KEEP_LOG" 2>/dev/null
+    echo "asahi-fwextract reported success but produced no cpio (kept: $KEEP_LOG)" > "$_why"
+    return 1
+  fi
+  # A PARTIAL PARSE MUST NOT PASS AS A SUCCESS. Every chip directory should
+  # contribute at least one file; fewer means the identity parser skipped some
+  # of the tree, which is how a half-empty firmware set ships looking fine.
+  if [ -n "$_n" ] && [ -n "$_chips" ] && [ "$_chips" -gt 0 ] && [ "$_n" -lt "$_chips" ]; then
+    info "WARNING: extracted $_n file(s) from $_cand candidate(s) across $_chips chip" >&2
+    info "         directories -- fewer files than chips, so the parse looks partial." >&2
+  fi
+  info "extracted $_n file(s) from $_cand candidate(s) in $_chips chip directory(ies)" >&2
+  echo "$_cpio"
+}
+
+# Unpack a vendorfw cpio into <dir>. Entries are prefixed vendorfw/ ; flatten
+# that away -- GNU cpio has no --strip-components, which is why this is done by
+# hand. --no-absolute-filenames because the archive comes off the ESP, which
+# anything with access to macOS can write: an entry naming /etc/... must land
+# under <dir>, not on the running system.
+unpack_cpio() {
+  mkdir -p "$2"
+  ( cd "$2" && cpio -idm --no-absolute-filenames < "$1" ) 2>/dev/null || return 1
+  if [ -d "$2/vendorfw" ]; then
+    mv "$2/vendorfw"/* "$2"/ 2>/dev/null
+    rm -rf "$2/vendorfw"
+  fi
+}
+
+# Check an unpacked tree against the manifest FWPackage wrote beside its cpio.
+# Prints the tally; returns non-zero on any mismatch OR missing file: a partial
+# unpack is not a firmware set to install.
+verify_manifest() {
+  _dir=$1; _man=$2; _what=$3
+  if [ ! -f "$_man" ]; then
+    info "$_what: no manifest alongside it -- unverified"
+    return 0
+  fi
+  _ok=0; _bad=0; _miss=0
+  while read -r kind path rest; do
+    case "$kind" in
+      FILE) want=${rest#SHA256 }
+            if [ -e "$_dir/$path" ]; then
+              got=$(sha256sum "$_dir/$path" | cut -d' ' -f1)
+              [ "$got" = "$want" ] && _ok=$((_ok+1)) || { _bad=$((_bad+1)); echo "    MISMATCH $path"; }
+            else _miss=$((_miss+1)); fi ;;
+      LINK) [ -e "$_dir/$path" ] && _ok=$((_ok+1)) || _miss=$((_miss+1)) ;;
+    esac
+  done < "$_man"
+  info "$_what: manifest $_ok verified, $_bad mismatched, $_miss missing"
+  [ "$_bad" -eq 0 ] && [ "$_miss" -eq 0 ]
+}
+
+# The macOS version the Asahi installer pinned for its stub -- which is what
+# its copy of the firmware is. Empty if it cannot be read.
+stub_version() {
+  python3 - 2>/dev/null <<'PY'
+import json
+v = json.load(open("/boot/efi/asahi/stub_info.json")).get("system_version", {})
+print(v.get("ProductVersion") or v.get("ProductBuildVersion") or "")
+PY
+}
+
+# 1. Wi-Fi and Bluetooth from a live capture, when there is one and it
+#    extracts and verifies cleanly. Preferred automatically: nothing is asked
+#    of the user -- if the file is there and sound, it is the better firmware.
+LIVE_OK=0
+if [ -f "$LIVE_FW" ]; then
+  info "found gathered firmware: $LIVE_FW ($(du -h "$LIVE_FW" 2>/dev/null | cut -f1))"
+  mkdir -p "$STAGE/live"
+  WHY=""
+  if ! tar xzf "$LIVE_FW" -C "$STAGE/live" 2>/dev/null; then
+    WHY="the archive would not unpack (tar failed) -- the capture is damaged"
+  elif [ ! -d "$STAGE/live/firmware/wifi" ]; then
+    WHY="the archive unpacked but holds no firmware/wifi/ tree -- wrong archive"
+  elif ! LIVE_CPIO=$(extract_from_tree "$STAGE/live/firmware" "$STAGE/livex"); then
+    [ -s "$STAGE/livex/why" ] && WHY=$(cat "$STAGE/livex/why")
+  elif ! unpack_cpio "$LIVE_CPIO" "$STAGE/liveunp" || [ ! -d "$STAGE/liveunp/brcm" ]; then
+    WHY="the extracted firmware would not unpack, or holds no brcm/"
+  elif ! verify_manifest "$STAGE/liveunp" "$STAGE/livex/out/manifest.txt" "gathered firmware"; then
+    WHY="the extracted firmware does not match its own manifest"
+  else
+    LIVE_OK=1
+  fi
+  if [ "$LIVE_OK" -eq 0 ]; then
+    # A failure here must never cost the machine its Wi-Fi, so it falls through
+    # to the ESP copy -- but say WHICH thing failed. "Did not yield a usable
+    # extraction" sends the reader to inspect their capture, which is the wrong
+    # end of the problem when the extractor is at fault.
+    info "  ** THE GATHERED FIRMWARE WAS NOT USED."
+    printf '%s\n' "$WHY" | sed 's/^/  ** /' >&2
+    if [ -f "$ESP_FW/firmware.cpio" ]; then
+      info "  ** Wi-Fi and Bluetooth fall back to the Asahi installer's copy. Re-run"
+      info "     this tool once the cause above is fixed -- nothing else about the"
+      info "     installation is affected."
+    fi
+  fi
+fi
+
+# 2. Everything else -- and Wi-Fi/Bluetooth when there is no usable capture --
+#    from the Asahi installer's copy on the ESP.
+UNP="$STAGE/unp"
+STUB=$(stub_version)
+ESP_LABEL="the Asahi installer's copy${STUB:+ (macOS $STUB, the version it pins for its stub)}"
+if [ -f "$ESP_FW/firmware.cpio" ]; then
+  info "source: $ESP_FW/firmware.cpio ($(du -h "$ESP_FW/firmware.cpio" | cut -f1))"
+  unpack_cpio "$ESP_FW/firmware.cpio" "$UNP" || die "cpio extraction failed"
+  verify_manifest "$UNP" "$ESP_FW/manifest.txt" "Asahi installer's copy" \
+    || die "manifest mismatch -- refusing to install"
+elif [ "$LIVE_OK" -eq 1 ]; then
+  info "WARNING: no $ESP_FW/firmware.cpio -- installing Wi-Fi and Bluetooth only."
+  info "         Webcam and multitouch firmware come from the Asahi installer's"
+  info "         copy, which this ESP lacks; run this again once it is restored."
+  ESP_LABEL="nothing (the ESP has no Asahi installer copy)"
+  mkdir -p "$UNP"
+else
+  # A capture that was found and could not be used was read from the ESP, so
+  # the ESP is mounted: name both sources rather than ask.
+  [ -f "$LIVE_FW" ] && die "the gathered firmware could not be used (above), and there is no $ESP_FW/firmware.cpio either -- nothing was installed"
+  die "no $ESP_FW/firmware.cpio -- is the ESP mounted?"
+fi
+
+# 3. Merge: brcm/ (Wi-Fi and Bluetooth) is replaced WHOLE by the capture, never
+#    mixed -- a leftover blob of another vintage would be picked for whichever
+#    board variant the capture happens not to name.
+if [ "$LIVE_OK" -eq 1 ]; then
+  rm -rf "$UNP/brcm"
+  cp -a "$STAGE/liveunp/brcm" "$UNP/brcm" || die "could not merge the gathered firmware"
+  SRC_LABEL="Wi-Fi/Bluetooth: a live macOS capture; everything else: $ESP_LABEL"
+else
+  SRC_LABEL="everything: $ESP_LABEL"
+fi
+[ -d "$UNP/brcm" ] || die "no brcm/ in the firmware to install -- unexpected layout"
+info "firmware source: $SRC_LABEL"
+info "to install: $(find "$UNP" -type f | wc -l) files" \
+     "($(find "$UNP/brcm" -type f | wc -l) Wi-Fi/Bluetooth," \
+     "$(find "$UNP" -type f ! -path "$UNP/brcm/*" | wc -l) other)"
+
+# ---- install --------------------------------------------------------------
+# Staged and swapped, so a re-run replaces the whole set rather than layering
+# over the last one, and a failed copy leaves the previous set in place.
+rm -rf "$DEST.new" "$DEST.old"
+cp -a "$UNP" "$DEST.new" || { rm -rf "$DEST.new"; die "could not stage $DEST.new"; }
+[ -d "$DEST" ] && { mv "$DEST" "$DEST.old" || die "could not move the old $DEST aside"; }
+mv "$DEST.new" "$DEST" || { [ -d "$DEST.old" ] && mv "$DEST.old" "$DEST"; die "install into $DEST failed"; }
+rm -rf "$DEST.old"
+# Record the source. An old firmware date in `--check` is not actionable on
+# its own: what matters is whether that was the only source available or a
+# better one failed on the way in.
+mkdir -p "$(dirname "$SRC_STAMP")" 2>/dev/null
+{ printf '%s\n' "$SRC_LABEL"; date '+%Y-%m-%d %H:%M:%S %Z'; } > "$SRC_STAMP" 2>/dev/null || true
+info "installed into $DEST"
+info "  wifi (brcmfmac): $(ls "$DEST/brcm" 2>/dev/null | grep -c '^brcmfmac')"
+info "  bt   (brcmbt)  : $(ls "$DEST/brcm" 2>/dev/null | grep -c '^brcmbt')"
+info "  other          : $(find "$DEST" -type f ! -path "$DEST/brcm/*" | wc -l) (webcam, multitouch, ...)"
+echo
+fw_report_age "$DEST"
+
+# ---- regulatory domain ----------------------------------------------------
+# Set via a cfg80211 module parameter rather than a boot-time `iw reg set`,
+# because it then applies before the first scan and survives kernel changes.
+if [ -n "$REGDOM" ]; then
+  echo "options cfg80211 ieee80211_regdom=$REGDOM" > /etc/modprobe.d/cfg80211.conf
+  info "regulatory domain $REGDOM written to /etc/modprobe.d/cfg80211.conf"
+  iw reg set "$REGDOM" 2>/dev/null && info "  and applied to the running system"
+fi
+
+echo
+info "Reload the drivers to pick this up. brcmfmac_wcc holds brcmfmac, so it"
+info "must be unloaded first; otherwise modprobe refuses brcmfmac as in use:"
+info "    modprobe -r brcmfmac_wcc ; modprobe -r brcmfmac ; modprobe brcmfmac"
+info "    modprobe -r hci_bcm4377  ; modprobe hci_bcm4377"
+info "Or simply reboot. Then check with:  $0 --check"

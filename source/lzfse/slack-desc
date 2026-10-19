@@ -1,0 +1,19 @@
+# HOW TO EDIT THIS FILE:
+# The "handy ruler" below makes it easier to edit a package description.
+# Line up the first '|' above the ':' following the base package name, and
+# the '|' on the right side marks the last column you can put a character in.
+# You must make exactly 11 lines for the formatting to be correct. It's also
+# customary to leave one space after the ':' except on otherwise blank lines.
+
+     |-----handy-ruler------------------------------------------------------|
+lzfse: lzfse (LZFSE compression library and tool)
+lzfse:
+lzfse: LZFSE is a Lempel-Ziv style data compression algorithm from Apple,
+lzfse: using Finite State Entropy coding. It targets a compression ratio
+lzfse: comparable to zlib at much higher speed.
+lzfse:
+lzfse: On Slackware for Apple Silicon it is a dependency of asahi-fwextract,
+lzfse: which uses it to unpack Apple's LZFSE-compressed firmware images.
+lzfse:
+lzfse: Homepage: https://github.com/lzfse/lzfse
+lzfse: Needed by asahi-fwupdate, to rebuild the EFI partition's firmware.

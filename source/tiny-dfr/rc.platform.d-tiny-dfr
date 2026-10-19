@@ -1,0 +1,8 @@
+# /etc/rc.d/rc.platform.d/aarch64/tiny-dfr
+#
+# Sourced by /etc/rc.d/rc.platform, which rc.M runs just before rc.local.
+# Touch Bar daemon (MacBook Pro 13-inch M1/M2); does nothing elsewhere.
+# Managed by the tiny-dfr package. To disable the service:
+#   chmod -x /etc/rc.d/rc.tiny-dfr
+# Upgrading the package leaves it disabled.
+[ -x /etc/rc.d/rc.tiny-dfr ] && /etc/rc.d/rc.tiny-dfr start

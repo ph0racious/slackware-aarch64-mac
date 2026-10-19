@@ -1,0 +1,19 @@
+# HOW TO EDIT THIS FILE:
+# The "handy ruler" below makes it easier to edit a package description.
+# Line up the first '|' above the ':' following the base package name, and
+# the '|' on the right side marks the last column you can put a character in.
+# You must make exactly 11 lines for the formatting to be correct. It's also
+# customary to leave one space after the ':' except on otherwise blank lines.
+
+        |-----handy-ruler------------------------------------------------------|
+tiny-dfr: tiny-dfr (Touch Bar daemon for Apple Silicon MacBook Pro)
+tiny-dfr:
+tiny-dfr: Draws the function and media keys on the Touch Bar of the 13-inch
+tiny-dfr: M1 and M2 MacBook Pro, and turns touches into key presses.
+tiny-dfr:
+tiny-dfr: Started at boot by /etc/rc.d/rc.tiny-dfr, which does nothing on
+tiny-dfr: machines without a Touch Bar. Settings: copy
+tiny-dfr: /usr/share/tiny-dfr/config.toml to /etc/tiny-dfr/config.toml.
+tiny-dfr:
+tiny-dfr: Written by the Asahi Linux project.
+tiny-dfr: Homepage: https://github.com/AsahiLinux/tiny-dfr

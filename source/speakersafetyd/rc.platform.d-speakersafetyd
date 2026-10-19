@@ -1,0 +1,8 @@
+# /etc/rc.d/rc.platform.d/aarch64/speakersafetyd
+#
+# Sourced by /etc/rc.d/rc.platform, which rc.M runs just before rc.local.
+# Asahi speaker protection; it MUST be running before audio is used.
+# Managed by the speakersafetyd package. To disable the service:
+#   chmod -x /etc/rc.d/rc.speakersafetyd
+# Upgrading the package leaves it disabled.
+[ -x /etc/rc.d/rc.speakersafetyd ] && /etc/rc.d/rc.speakersafetyd start

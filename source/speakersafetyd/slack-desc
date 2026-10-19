@@ -1,0 +1,19 @@
+# HOW TO EDIT THIS FILE:
+# The "handy ruler" below makes it easier to edit a package description.
+# Line up the first '|' above the ':' following the base package name, and
+# the '|' on the right side marks the last column you can put a character in.
+# You must make exactly 11 lines for the formatting to be correct. It's also
+# customary to leave one space after the ':' except on otherwise blank lines.
+
+              |-----handy-ruler------------------------------------------------------|
+speakersafetyd: speakersafetyd (Apple Silicon speaker protection daemon)
+speakersafetyd:
+speakersafetyd: Enforces thermal limits on Apple Silicon speakers,
+speakersafetyd: which can be driven beyond what they survive. Asahi's kernel
+speakersafetyd: driver holds them at a reduced volume until this daemon runs;
+speakersafetyd: the daemon then lifts that limit while it monitors them.
+speakersafetyd:
+speakersafetyd: Upstream relies on systemd; this package wires it into the
+speakersafetyd: SysV boot via /etc/rc.d/rc.speakersafetyd instead.
+speakersafetyd: REQUIRED: without it Asahi's driver keeps the speakers quiet.
+speakersafetyd: Homepage: https://github.com/AsahiLinux/speakersafetyd

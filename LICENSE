@@ -1,0 +1,65 @@
+Copyright 2026  Jim Phoenix, Earth, Milky Way
+All rights reserved.
+
+Redistribution and use of this script, with or without modification, is
+permitted provided that the following conditions are met:
+
+1. Redistributions of this script must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+
+ THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR IMPLIED
+ WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+ MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO
+ EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+ SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+ PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+ OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+ WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+ OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+ ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+NOTES ON SCOPE
+==============
+
+This is the licence Slackware itself uses for its build scripts, chosen
+deliberately: this is a Slackware port, and its scripts sit alongside stock
+ones that carry the same terms.
+
+It covers the original work in this tree -- the SlackBuilds, the tooling under
+tools/, the installer text under installer-text/, and the documentation.
+
+It does NOT relicense anything this tree merely carries or builds:
+
+  * The Linux kernel, U-Boot, m1n1, Mesa, PipeWire and every other upstream
+    project retain their own licences. Building or patching software does not
+    change its terms.
+
+  * The patches this tree originates are offered under the licence of the
+    project each one changes: those under source/kernel_armv8-mac/patches/
+    are GPL-2.0, as kernel code is; those for asahi-fwextract and
+    asahi-scripts are MIT, as those projects are. See NOTICE.
+
+  * The U-Boot series in source/hwm-bw-mac/patches/, the speakersafetyd
+    patch and the tiny-dfr patch are other people's work, carried verbatim
+    and under their own terms. Author and Signed-off-by lines are part of those files and are
+    left intact. See NOTICE.
+
+  * source/slackware-k/ is inherited from Slackware ARM and carries its own
+    copyright notice, which is left untouched.
+
+  * Some SlackBuilds here derive from Slackware's own -- notably mesa-asahi
+    and pipewire-lv2, which take their meson flag sets from Slackware's.
+    Those files retain the upstream copyright notices as well as this one,
+    which is precisely what condition 1 above requires.
+
+
+TRADEMARKS
+==========
+
+This is an unofficial port. It is not endorsed by, affiliated with, or
+supported by Slackware, the Asahi Linux project, or Apple. "Slackware" is a
+trademark of Patrick Volkerding; "Apple", "Mac", "Mac mini" and "MacBook" are
+trademarks of Apple Inc.; other names are the marks of their respective owners.
+They are used here only to say accurately what this software is and what it
+runs on.

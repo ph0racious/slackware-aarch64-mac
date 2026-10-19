@@ -1,0 +1,11 @@
+# /etc/logrotate.d/tiny-dfr, from the tiny-dfr package.
+#
+# rc.tiny-dfr appends the daemon's output to this file. Stock's wpa_supplicant
+# entry has the same shape. copytruncate, not create: the daemon holds the
+# file open and never reopens it.
+/var/log/tiny-dfr.log {
+    missingok
+    notifempty
+    size 30k
+    copytruncate
+}

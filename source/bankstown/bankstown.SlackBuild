@@ -1,0 +1,105 @@
+#!/bin/bash
+
+# Slackware build script for bankstown (LV2 bass enhancement plugin)
+
+# Copyright 2026  Jim Phoenix, Earth, Milky Way
+# All rights reserved.
+#
+# Redistribution and use of this script, with or without modification, is
+# permitted provided that the following conditions are met:
+#
+# 1. Redistributions of this script must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+#
+#  THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR IMPLIED
+#  WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+#  MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO
+#  EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+#  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+#  PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+#  OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+#  WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+#  OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+#  ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+# WHY: asahi-audio's filter chain loads bankstown for psychoacoustic bass
+# enhancement -- small Apple speakers are physically incapable of real low end,
+# so missing fundamentals are synthesised from their harmonics.
+#
+# LV2 PATH: upstream's Makefile already defaults to LIBDIR=/usr/lib64, which
+# happens to be right for Slackware aarch64. We pass it explicitly anyway rather
+# than depend on an upstream default that could change under us -- a plugin
+# installed to the wrong libdir is not found, and the failure is silent.
+#
+# RUST: no rust-toolchain.toml, so the system rustc is used (as with the kernel
+# and speakersafetyd). The crate depends on the `lv2` Rust bindings, so the
+# build fetches from crates.io -- it is NOT an offline build.
+#
+# Run tools/fetch-sources.sh bankstown to populate sources/.
+
+cd $(dirname $0) ; CWD=$(pwd)
+
+PRGNAM=bankstown
+VERSION=${VERSION:-1.1.0}
+BUILD=${BUILD:-1}
+TAG=${TAG:-_mac}
+
+if [ -z "$ARCH" ]; then
+  ARCH=$( uname -m )
+fi
+
+if [ ! -z "${PRINT_PACKAGE_NAME}" ]; then
+  echo "$PRGNAM-$VERSION-$ARCH-$BUILD$TAG.txz"
+  exit 0
+fi
+
+TMP=${TMP:-/tmp/mac}
+PKG=$TMP/package-$PRGNAM
+OUTPUT=${OUTPUT:-/tmp}
+
+if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "x86_64" ]; then
+  LIBDIRSUFFIX="64"
+else
+  LIBDIRSUFFIX=""
+fi
+
+set -e
+
+rm -rf $PKG
+mkdir -p $TMP $PKG $OUTPUT
+cd $TMP
+rm -rf $PRGNAM-$VERSION
+tar xf $CWD/sources/$PRGNAM-$VERSION.tar.gz
+cd $PRGNAM-$VERSION
+
+chown -R root:root .
+find . \( -type f -o -type d \) \
+ \( \( -perm 777 -o -perm 775 -o -perm 711 -o -perm 555 -o -perm 511 \) \
+ -exec chmod 755 {} \+ -o \
+ \( -perm 666 -o -perm 664 -o -perm 600 -o -perm 444 -o -perm 440 -o -perm 400 \) \
+ -exec chmod 644 {} \+ \)
+
+export RUSTFLAGS="-C opt-level=3"
+
+cargo build --release --locked
+
+make install DESTDIR=$PKG LIBDIR=/usr/lib${LIBDIRSUFFIX}
+
+BUNDLE=$PKG/usr/lib${LIBDIRSUFFIX}/lv2/$PRGNAM.lv2
+for f in $PRGNAM.so manifest.ttl $PRGNAM.ttl; do
+  [ -f "$BUNDLE/$f" ] || { echo "$PRGNAM: missing $f in LV2 bundle" >&2; exit 1; }
+done
+echo "$PRGNAM: LV2 bundle complete at /usr/lib${LIBDIRSUFFIX}/lv2/$PRGNAM.lv2"
+
+find $PKG -type f -name '*.so' -print0 \
+  | xargs -0r strip --strip-unneeded 2>/dev/null || true
+
+mkdir -p $PKG/usr/doc/$PRGNAM-$VERSION
+cp -a LICENSE* README* $PKG/usr/doc/$PRGNAM-$VERSION 2>/dev/null || true
+cat $CWD/$PRGNAM.SlackBuild > $PKG/usr/doc/$PRGNAM-$VERSION/$PRGNAM.SlackBuild
+
+mkdir -p $PKG/install
+cat $CWD/slack-desc > $PKG/install/slack-desc
+
+cd $PKG
+/sbin/makepkg -l y -c n $OUTPUT/$PRGNAM-$VERSION-$ARCH-$BUILD$TAG.txz

@@ -1,0 +1,19 @@
+# HOW TO EDIT THIS FILE:
+# The "handy ruler" below makes it easier to edit a package description.
+# Line up the first '|' above the ':' following the base package name, and
+# the '|' on the right side marks the last column you can put a character in.
+# You must make exactly 11 lines for the formatting to be correct. It's also
+# customary to leave one space after the ':' except on otherwise blank lines.
+
+    |-----handy-ruler------------------------------------------------------|
+serd: serd (lightweight RDF syntax library)
+serd:
+serd: Serd is a lightweight C library for reading and writing RDF in Turtle,
+serd: NTriples, NQuads and TriG. It is the base of the LV2 plugin
+serd: infrastructure: LV2 plugins describe themselves in Turtle.
+serd:
+serd:
+serd:
+serd:
+serd: REQUIRED by the Apple Silicon audio chain (lilv dependency).
+serd: Homepage: https://lv2plug.in/

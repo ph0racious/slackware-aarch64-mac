@@ -1,0 +1,37 @@
+Compute the firmware subpath with relpath, not str.lstrip.
+
+wifi.py builds each firmware file's identity from its path relative to the tree
+it was given:
+
+    subpath = dirpath.lstrip(source_path)
+
+str.lstrip takes a SET OF CHARACTERS, not a prefix.  It removes leading
+characters of dirpath for as long as each one appears anywhere in source_path,
+so it eats into the first directory name whenever that name begins with a
+character the source path happens to contain.  The firmware directories are
+named by chip and revision -- C-4388__s-C0, C-4364__s-B2 -- so a source path
+containing a capital C turns C-4364__s-B2 into -4364__s-B2.  The identity
+parser then reads an empty key and dies on `assert not props`, taking the whole
+extraction with it.
+
+Whether it happens is decided by the characters in the caller's path, which is
+why it looks intermittent: a caller extracting into a temporary directory hits
+it whenever mktemp's random name contains one of those letters.
+
+os.path.relpath does what the code means.  It returns "." when dirpath IS
+source_path, where lstrip returned "", so that case is normalised to keep the
+behaviour identical on the path that already worked.
+
+--- a/asahi_firmware/wifi.py
++++ b/asahi_firmware/wifi.py
+@@ -45,7 +45,9 @@
+                 dirnames.remove("perf")
+             if "assert" in dirnames:
+                 dirnames.remove("assert")
+-            subpath = dirpath.lstrip(source_path)
++            subpath = os.path.relpath(dirpath, source_path)
++            if subpath == ".":
++                subpath = ""
+             for name in sorted(filenames):
+                 if not any(name.endswith("." + i) for i in self.EXTMAP):
+                     continue

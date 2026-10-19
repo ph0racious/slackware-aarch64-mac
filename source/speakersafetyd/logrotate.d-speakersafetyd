@@ -1,0 +1,13 @@
+# /etc/logrotate.d/speakersafetyd, from the speakersafetyd package.
+#
+# rc.speakersafetyd appends the daemon's output to this file, and the daemon
+# logs a line whenever a speaker group's gain limit changes, which while a
+# laptop's speakers are being limited can be every audio period. Stock's
+# wpa_supplicant entry has the same shape. copytruncate, not create: the
+# daemon holds the file open and never reopens it.
+/var/log/speakersafetyd.log {
+    missingok
+    notifempty
+    size 30k
+    copytruncate
+}

@@ -1,0 +1,26 @@
+# Configuration for update-m1n1 on Slackware AArch64 / Apple Silicon.
+# Installed as /etc/default/update-m1n1.  Sourced by /usr/bin/update-m1n1, which
+# assembles <ESP>/m1n1/boot.bin from these inputs.
+#
+# Nothing runs update-m1n1 during install: a fresh install boots the m1n1
+# stage 2, U-Boot and device trees the Asahi installer put on the ESP.  Running
+# it replaces all three with the pieces named here.
+
+# m1n1 stage 2 and U-Boot both come from the hwm-bw-mac package, which
+# installs them into /usr/lib/asahi-boot/.  update-m1n1 already defaults to
+# these paths, so they are left commented for reference.
+#M1N1="/usr/lib/asahi-boot/m1n1.bin"
+#U_BOOT="/usr/lib/asahi-boot/u-boot-nodtb.bin"
+
+# Device trees: the KERNEL's, from the newest installed -armv8-mac module tree.
+# Upstream's Arch package makes the same choice (its update-m1n1 defaults DTBS
+# to /lib/modules/<newest>/dtbs/*.dtb, and its pacman hook re-runs it whenever
+# those change).
+#
+# NOT the trees hwm-bw-mac installs under /usr/lib/asahi-boot/dtb.  Those are
+# U-Boot's mainline device trees, and they lack nodes Asahi's drivers need: the
+# display controller, the sound card and headphone codec, and the M2 laptops'
+# keyboard and trackpad.  A boot.bin built from them boots without those.
+#
+# Unquoted on purpose: update-m1n1 expands the glob itself.
+DTBS=$(/bin/ls -d /lib/modules/*-armv8-mac 2>/dev/null | sort -rV | head -1)/dtbs/*.dtb

@@ -1,0 +1,19 @@
+# HOW TO EDIT THIS FILE:
+# The "handy ruler" below makes it easier to edit a package description.
+# Line up the first '|' above the ':' following the base package name, and
+# the '|' on the right side marks the last column you can put a character in.
+# You must make exactly 11 lines for the formatting to be correct. It's also
+# customary to leave one space after the ':' except on otherwise blank lines.
+
+                        |-----handy-ruler------------------------------------------------------|
+kernel_armv8-mac-headers: kernel_armv8-mac-headers (kernel build tree)
+kernel_armv8-mac-headers:
+kernel_armv8-mac-headers: The kernel build tree for kernel_armv8-mac, installed
+kernel_armv8-mac-headers: under /lib/modules/<version>/build. Needed to compile
+kernel_armv8-mac-headers: out-of-tree kernel modules against this kernel.
+kernel_armv8-mac-headers:
+kernel_armv8-mac-headers: This is not the same as d/kernel-headers, which ships the
+kernel_armv8-mac-headers: sanitised userspace headers used to build libc. You want
+kernel_armv8-mac-headers: both; they do different jobs.
+kernel_armv8-mac-headers:
+kernel_armv8-mac-headers: Install only alongside the matching kernel build.

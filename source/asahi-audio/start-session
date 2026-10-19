@@ -1,0 +1,121 @@
+#!/bin/sh
+#
+# asahi-audio start-session -- start the PipeWire stack this port's audio needs.
+#
+# WHY THIS EXISTS
+# ---------------
+# Slackware's default sound server is PulseAudio; PipeWire is opt-in, through
+# Pat's pipewire-enable.sh.
+#
+# This port is not optional about it. Every piece of its audio is PipeWire:
+# asahi-audio ships WirePlumber rules and PipeWire filter-chain graphs, and the
+# pipewire package is rebuilt with -Dlv2=enabled specifically to host the LV2
+# plugins those graphs name. Under PulseAudio none of it loads, the card is
+# never configured, and the desktop shows a dummy output -- which looks exactly
+# like broken hardware.
+#
+# ORDER MATTERS. WirePlumber is a client: it connects to PipeWire's socket and
+# exits if nothing is listening. pipewire-pulse likewise. So pipewire goes
+# first, and the others only once it is actually accepting connections.
+#
+# IDEMPOTENT ON PURPOSE. Autostart entries can fire more than once -- a nested
+# session, a manual run, a desktop restart -- and two PipeWire daemons fighting
+# over one socket is worse than none. The check is PER DAEMON, so running this
+# by hand also REPAIRS a half-up session rather than shrugging at it; see the
+# comment on start() below.
+#
+# This script does not fight PulseAudio for the socket -- it cannot win, and it
+# does not try. The package's doinst.sh disables PulseAudio's autostart entry
+# using Slackware's own switch. See doinst.sh for the evidence.
+
+PW=/usr/bin/pipewire
+PWP=/usr/bin/pipewire-pulse
+WP=/usr/bin/wireplumber
+
+# The way back to PulseAudio is rc.asahi-audio's executable bit (its header
+# says so). With that script disabled, PipeWire is not started here either.
+[ -e /etc/rc.d/rc.asahi-audio ] && [ ! -x /etc/rc.d/rc.asahi-audio ] && exit 0
+
+for b in "$PW" "$PWP" "$WP"; do
+   [ -x "$b" ] || { echo "asahi-audio start-session: $b missing; not starting" >&2; exit 1; }
+done
+
+# Without XDG_RUNTIME_DIR there is nowhere to put the sockets, and every sound
+# server fails the same way -- PulseAudio's version of it is
+# "Failed to create secure directory (/run/user/N/pulse)".
+#
+# It is missing when a session was started with `su` rather than by logging in,
+# because su creates no logind session and so elogind allocates no runtime
+# directory. Say that plainly rather than failing as an audio fault.
+if [ -z "${XDG_RUNTIME_DIR}" ] || [ ! -d "${XDG_RUNTIME_DIR}" ]; then
+   echo "asahi-audio start-session: XDG_RUNTIME_DIR is unset or missing." >&2
+   echo "  No sound server can start without it. This normally means the session" >&2
+   echo "  was started with 'su' instead of a login -- su creates no logind" >&2
+   echo "  session, so no /run/user/\$(id -u) is allocated. Log in as the user." >&2
+   exit 1
+fi
+
+# Slackware's own wireplumber.desktop.sample uses daemon(1) for this, so follow
+# it where available and fall back to plain backgrounding where it is not.
+#
+#   -r  respawn the client if it dies
+#   -B  stop when the user's last logind session ends, so nothing is left
+#       running after logout
+#
+# ⚠ NOT -f. The sample uses `-frB`, and `-f` is --foreground: it does not
+# return. That is harmless in a .desktop Exec= line, because the desktop forks
+# each entry, and fatal here, because this script starts three things IN ORDER
+# and would block forever on the first.
+#
+# IDEMPOTENCY IS PER DAEMON, not "is pipewire up?".
+#
+# An early exit whenever a pipewire process exists assumes that if one is
+# running they all are. That is wrong in the exact case that matters: PulseAudio
+# can take the pulse socket while pipewire itself is perfectly healthy, and
+# pipewire-pulse then dies on every attempt, however often `daemon -r` retries
+# it. The session is left with pipewire and wireplumber running and NO pulse
+# server, and a blanket early exit would make re-running this script do
+# nothing at all to fix it.
+#
+# So check each one separately, and skip only what is genuinely already there.
+running() {
+   pgrep -u "$(id -u)" -x "$1" >/dev/null 2>&1
+}
+
+start() {
+   name=$1; shift
+   running "$name" && return 0
+   # daemon(1) refuses a second instance under the same --name, but a
+   # supervisor whose client keeps dying stays alive holding that name. Clear
+   # only OUR supervisor for this one daemon, matched on the full command line
+   # (the trailing space stops --name=pipewire matching --name=pipewire-pulse);
+   # never `pkill -x daemon`, which would also take out this user's other
+   # daemon(1) supervisors, one per PipeWire daemon.
+   if [ -x /usr/bin/daemon ]; then
+      pkill -u "$(id -u)" -f "daemon -rB --pidfiles=${XDG_RUNTIME_DIR} --name=$name " 2>/dev/null
+      /usr/bin/daemon -rB --pidfiles="${XDG_RUNTIME_DIR}" --name="$name" "$@"
+   else
+      "$@" >/dev/null 2>&1 &
+   fi
+}
+
+start pipewire "$PW"
+
+# Wait for the socket rather than sleeping a guessed interval: on a cold boot
+# PipeWire can take appreciably longer than on a warm restart, and a fixed sleep
+# is either too short sometimes or too slow always.
+i=0
+while [ $i -lt 50 ]; do
+   [ -S "${XDG_RUNTIME_DIR}/pipewire-0" ] && break
+   i=$((i + 1))
+   sleep 0.1
+done
+[ -S "${XDG_RUNTIME_DIR}/pipewire-0" ] || {
+   echo "asahi-audio start-session: pipewire did not create its socket; stopping" >&2
+   exit 1
+}
+
+start pipewire-pulse "$PWP"
+start wireplumber    "$WP"
+
+exit 0

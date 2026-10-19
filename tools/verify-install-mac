@@ -1,0 +1,443 @@
+#!/bin/bash
+#
+# Copyright 2026  Jim Phoenix, Earth, Milky Way.  Modified BSD terms:
+# redistributions must retain this notice.  Full text in LICENSE at the
+# slackware-aarch64-mac tree root.
+#
+# verify-install-mac -- check that an installed Slackware system on Apple
+# Silicon is coherent: config files, the boot chain, the kernel package, the
+# GRUB entry and the vendor firmware. Run it as root on the installed machine.
+#
+# --tester adds a report block for a hardware test; see docs/TESTING.md.
+pass=0; fail=0
+ok()   { printf "  PASS  %s\n" "$1"; pass=$((pass+1)); }
+bad()  { printf "  FAIL  %s\n" "$1"; fail=$((fail+1)); }
+
+# --tester adds a submission block after the checks, for a hardware report.
+# Everything above is unchanged by it: a tester and a developer run the same
+# checks, and the block only formats what the machine can state for itself.
+TESTER=0
+for a in "$@"; do
+  case "$a" in
+    --tester) TESTER=1 ;;
+    -h|--help) echo "usage: $0 [--tester]"; exit 0 ;;
+    *) echo "verify-install-mac: unknown argument: $a" >&2; exit 2 ;;
+  esac
+done
+
+# Root, as grub-entry-mac and vendorfw-install-mac require. Run by another
+# user, update-m1n1 fails in section 5 (it rewrites /run/m1n1.conf), which
+# would read as a broken install rather than as the wrong user.
+[ "$(id -u)" = 0 ] || { echo "verify-install-mac: must be root" >&2; exit 1; }
+
+# Scratch space for sections 3 and 5, removed on exit. Never fixed names under
+# /tmp: this runs as root, and stock Slackware leaves fs.protected_symlinks
+# off, so a name another user planted there as a symlink would redirect the
+# write to any file on the system.
+VT=$(mktemp -d) || { echo "verify-install-mac: cannot create a scratch directory" >&2; exit 1; }
+trap 'rm -rf "$VT"' EXIT
+
+dt() { tr -d '\0' < "/proc/device-tree/$1" 2>/dev/null; }
+
+echo "=== 1. config file: fresh-install .new handling ==="
+if [ -f /etc/default/update-m1n1 ]; then
+  ok "/etc/default/update-m1n1 exists (renamed from .new)"
+  # Evaluate it the way update-m1n1 does, by sourcing it, rather than matching
+  # its text: the value is an expression. It must name this port's kernel's
+  # device trees. U-Boot's mainline set under /usr/lib/asahi-boot/dtb lacks the
+  # display controller, sound card and M2 laptop keyboard, so a stage 2 built
+  # from it boots without them.
+  _dtbs=$( . /etc/default/update-m1n1 >/dev/null 2>&1; echo "${DTBS:-}" )
+  case "$_dtbs" in
+    /lib/modules/*-armv8-mac/dtbs/\*.dtb)
+      if ls $_dtbs >/dev/null 2>&1; then
+        ok "DTBS takes the kernel's device trees (${_dtbs%/dtbs/*})"
+      else
+        bad "DTBS names $_dtbs, which matches no files"
+      fi ;;
+    *) bad "DTBS is '${_dtbs:-unset}' -- update-m1n1 would build stage 2 without this kernel's device trees" ;;
+  esac
+else
+  bad "/etc/default/update-m1n1 missing (doinst.sh did not rename .new)"
+fi
+# A leftover .new is not automatically wrong. Slackware's config() keeps the
+# admin's file and leaves the new one as .new whenever the two DIFFER, which is
+# what an upgrade carrying a changed default is supposed to look like. It is a
+# defect only when the two are identical -- config() should have removed it --
+# or when the live file is missing entirely (checked above).
+if [ -f /etc/default/update-m1n1.new ]; then
+  if cmp -s /etc/default/update-m1n1 /etc/default/update-m1n1.new; then
+    bad "stale .new left behind (identical to the live file; config() should have removed it)"
+  else
+    printf "  NOTE  /etc/default/update-m1n1.new differs from the live file --\n"
+    printf "        normal after an upgrade that changed the shipped default; the\n"
+    printf "        admin's file is kept. On a fresh install there is no .new.\n"
+  fi
+else
+  ok "no stale .new"
+fi
+
+echo "=== 2. boot-chain artifacts ==="
+for f in /usr/lib/asahi-boot/m1n1.bin /usr/lib/asahi-boot/u-boot-nodtb.bin; do
+  [ -s "$f" ] && ok "$f ($(stat -c%s "$f") bytes)" || bad "$f missing/empty"
+done
+n=$(ls /usr/lib/asahi-boot/dtb/*.dtb 2>/dev/null | wc -l)
+[ "$n" -gt 0 ] && ok "$n Apple device trees" || bad "no device trees"
+# hwm-bw-mac installs only t*.dtb and excludes six non-Mac families; anything
+# else here is a phone, tablet, Apple TV or T2 tree that leaked through.
+ls /usr/lib/asahi-boot/dtb/ 2>/dev/null | grep -qE '^t(7000|7001|8010|8011|8012|8015)-|^[^t]' \
+  && bad "non-Mac DTBs leaked in" || ok "DTB filter clean (Macs only)"
+
+echo "=== 3. userland tools run ==="
+command -v update-m1n1 >/dev/null && ok "update-m1n1 on PATH" || bad "update-m1n1 missing"
+asahi-fwextract --help >/dev/null 2>&1 && ok "asahi-fwextract runs" || bad "asahi-fwextract broken"
+echo hello > "$VT/t" && lzfse -encode -i "$VT/t" -o "$VT/t.lz" 2>/dev/null \
+  && lzfse -decode -i "$VT/t.lz" -o "$VT/t2" 2>/dev/null && cmp -s "$VT/t" "$VT/t2" \
+  && ok "lzfse roundtrip" || bad "lzfse roundtrip failed"
+
+echo "=== 4. kernel package layout ==="
+# Derived, not hardcoded. A pinned version string here silently starts failing
+# on the next kernel bump, and a verification tool that fails on a good machine
+# teaches people to ignore it.
+#
+# Not `| head -1`. With two of our kernels installed, taking the first silently
+# verifies a tree that may not be the running one -- the same class of mistake
+# build-installer-iso.sh refuses to make when selecting staged packages. If
+# there is more than one, say so rather than picking.
+mapfile -t KVS < <(ls /lib/modules/ 2>/dev/null | grep -E -- '-armv8-mac$')
+if [ "${#KVS[@]}" -eq 0 ]; then
+  bad "no *-armv8-mac modules dir"
+  KV=""
+elif [ "${#KVS[@]}" -gt 1 ]; then
+  bad "${#KVS[@]} *-armv8-mac module trees installed: ${KVS[*]}
+        Cannot tell which this medium shipped -- remove the ones you do not want."
+  KV=""
+else
+  KV=${KVS[0]}
+  ok "modules dir /lib/modules/$KV"
+fi
+[ -s /boot/Image-armv8-mac ] && ok "/boot/Image-armv8-mac resolves" || bad "/boot/Image-armv8-mac missing"
+# Only meaningful once KV is unambiguous. Running them against an empty KV
+# reports "asahi.ko MISSING" and "kernel dtbs missing" as well, which buries the
+# one fact that matters under two symptoms of it.
+if [ -n "$KV" ]; then
+  # A BUILT-IN DRIVER IS NOT A .ko. Vanilla Asahi's config has CONFIG_DRM_ASAHI=y,
+  # so the GPU driver is inside vmlinux and no asahi.ko exists; a config that
+  # builds it modular is equally correct. Absence from BOTH is the defect, so
+  # check the filesystem for =m and modules.builtin for =y -- the same two
+  # mechanisms the driver-parity gate uses.
+  if find "/lib/modules/$KV" -name 'asahi.ko*' 2>/dev/null | grep -q .; then
+    ok "GPU driver present (asahi.ko)"
+  elif grep -q '/asahi\.ko$' "/lib/modules/$KV/modules.builtin" 2>/dev/null; then
+    ok "GPU driver present (built into the kernel)"
+  else
+    bad "GPU driver absent: no asahi.ko and nothing in modules.builtin"
+  fi
+  [ -d "/lib/modules/$KV/dtbs" ] && ok "kernel dtbs dir present" || bad "kernel dtbs missing"
+else
+  printf "  SKIP  asahi.ko and dtbs checks (module tree ambiguous, see above)\n"
+fi
+
+echo "=== 5. THE integration test: update-m1n1 builds boot.bin end-to-end ==="
+# Deliberately the <outfile> form: it is non-destructive and runs anywhere.
+# Be aware it skips ESP detection, so it proves the payload ASSEMBLES, not that
+# it can be installed. The bare 'update-m1n1' additionally needs the ESP to be
+# identifiable.
+if update-m1n1 "$VT/boot.bin" >/dev/null 2>&1 && [ -s "$VT/boot.bin" ]; then
+  ok "update-m1n1 produced boot.bin ($(stat -c%s "$VT/boot.bin") bytes)"
+else
+  bad "update-m1n1 failed to produce boot.bin"
+fi
+
+echo "=== 6. bootloader is actually wired to our kernel ==="
+# Packaging a kernel and booting it are different things. Slackware's grub.cfg
+# points at Slackware's own generic ARM kernel unless something changes it, and
+# grub-mkconfig refuses to run on ARM, so nothing does. Without this check an
+# install looks complete and reboots into a kernel that cannot run a Mac.
+GRUBTOOL=/usr/sbin/grub-entry-mac
+if [ ! -x "$GRUBTOOL" ]; then
+  bad "grub-entry-mac not found (ships in kernel_armv8-mac)"
+elif _gv=$("$GRUBTOOL" --verify 2>&1); then
+  ok "GRUB has a valid entry (no initrd, no devicetree, kernel present)"
+  # A warning does not fail the entry, but it explains a silent boot (no
+  # console=) or an entry a separate /boot cannot boot, so it is shown.
+  printf '%s\n' "$_gv" | awk '/^  WARN/ {w = 1} /^  (ok|FAIL|note) / {w = 0} w' | sed 's/^/        /'
+else
+  bad "GRUB has no valid entry -- run: grub-entry-mac --install"
+  printf '%s\n' "$_gv" | sed 's/^/        /'
+fi
+
+echo "=== 7. vendor firmware extracted ==="
+# Silent failure: without this there is no Wi-Fi and no Bluetooth -- and on the
+# machines that have them, no webcam and no multitouch (M2 keyboard and
+# trackpad, Touch Bar) -- and nothing reports an error. The firmware is on the
+# ESP, so on an installed machine there is no excuse for it being absent.
+# vendorfw-install-mac installs to /lib/firmware/updates. Not
+# /lib/firmware/vendor: that is Fedora Asahi's path, reached from an initramfs
+# hook this port does not have.
+FWDIR=/lib/firmware/updates
+if [ -d "$FWDIR" ] && [ -n "$(ls -A "$FWDIR" 2>/dev/null)" ]; then
+  ok "vendor firmware present in $FWDIR ($(find "$FWDIR" -type f 2>/dev/null | wc -l) files)"
+else
+  bad "no firmware in $FWDIR -- Wi-Fi and Bluetooth will not work"
+fi
+# Everything outside brcm/ comes from the Asahi installer's copy, whether or not
+# Wi-Fi was harvested live -- so every such file its manifest lists must be here.
+ESP_MAN=/boot/efi/vendorfw/manifest.txt
+if [ -f "$ESP_MAN" ]; then
+  _want=$(awk '$1 == "FILE" && $2 !~ /^brcm\// {print $2}' "$ESP_MAN")
+  _nwant=$(printf '%s\n' "$_want" | grep -c .)
+  _lost=$(printf '%s\n' "$_want" | while read -r p; do
+            [ -n "$p" ] && [ ! -e "$FWDIR/$p" ] && echo "$p"; done)
+  if [ -z "$_lost" ]; then
+    ok "non-Wi-Fi firmware from the Asahi installer's copy installed ($_nwant files)"
+  else
+    bad "firmware from the Asahi installer's copy missing from $FWDIR:
+$(printf '%s\n' "$_lost" | sed 's/^/        /')
+        run: vendorfw-install-mac"
+  fi
+else
+  printf "  SKIP  no %s -- is the ESP mounted?\n" "$ESP_MAN"
+fi
+
+echo
+echo "RESULT: $pass passed, $fail failed"
+
+# ---------------------------------------------------------------------------
+# --tester: the block a tester copies into a report.
+#
+# A tester submits ONLY this, so it repeats a little of what asahi-diagnose
+# reports. That is deliberate: asahi-diagnose checks Asahi's components for
+# Asahi's team, this checks our install. Nobody runs --tester by accident, so it
+# may go as deep as is useful.
+#
+# No MAC addresses and no raw `ip` output. An interface identifier says nothing
+# about whether the port works, and a tester pasting into a public issue should
+# not have to notice they are publishing one.
+# ---------------------------------------------------------------------------
+
+# WHAT IDENTIFIES A FIRMWARE RELEASE HERE, AND WHAT DOES NOT.
+#
+# The driver's line is assembled at runtime:
+#   Firmware: BCM4388/4 wl0: Jul 10 2026 02:04:24 version 23.50.20.2.41.51.209 FWID 01-bf1babe1
+# The blob itself carries only the printf TEMPLATE for that -- literally
+# " wl%d: %s version %s FWID 01-%08x" -- so the assembled string cannot be
+# grepped out of a file, and nor can the FWID be compared: it and the build
+# second differ between board variants of one release.
+#
+# The version token IS invariant across a release's variants, so it is the key.
+# A capture also legitimately holds SEVERAL releases, so the question asked of
+# each location is "does it contain the running version", not "what is its
+# version".
+fw_versions() {          # stdin -> distinct version tokens, space separated
+  grep -aoE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' 2>/dev/null \
+    | sort -u | tr '\n' ' ' | sed 's/  *$//'
+}
+fw_row() {               # label, versions
+  [ -n "$2" ] && printf '  %-13s %s\n' "$1" "$2" || printf '  %-13s absent\n' "$1"
+}
+fw_has() {               # versions, wanted -> 0 if present
+  case " $1 " in *" $2 "*) return 0 ;; esac
+  return 1
+}
+
+link() {                 # interface -> "up" / "down" / "absent", no identifiers
+  [ -e "/sys/class/net/$1" ] || { echo absent; return; }
+  cat "/sys/class/net/$1/operstate" 2>/dev/null || echo unknown
+}
+
+if [ "$TESTER" = 1 ]; then
+  MODEL=$(dt model)
+
+  # The chip the driver actually resolved. Globbing a looser prefix samples the
+  # WRONG REVISION -- brcmfmac4388b0 sorts before c0 and carries 2022 firmware --
+  # which is the same trap recorded in vendorfw-install-mac.
+  BASE=$(dmesg 2>/dev/null \
+    | sed -nE 's|.*brcmf_fw_alloc_request: using brcm/([^ ]+) for chip.*|\1|p' | tail -1)
+  CHIP=$(printf '%s' "$BASE" | sed -nE 's/^brcmfmac([0-9]+).*/\1/p')
+  [ -n "$CHIP" ] || CHIP=$(dmesg 2>/dev/null \
+    | sed -nE 's|.*Firmware: BCM([0-9]+)/.*|\1|p' | tail -1)
+
+  RUN_DATE=$(dmesg 2>/dev/null \
+    | sed -nE 's|.*wl0: ([A-Z][a-z][a-z] +[0-9]+ [0-9]{4} [0-9:]+) version .*|\1|p' | tail -1)
+  RUN_VER=$(dmesg 2>/dev/null \
+    | sed -nE 's|.*wl0: .* version ([0-9.]+) .*|\1|p' | tail -1)
+
+  INST_VERS=""
+  [ -n "$BASE" ] && INST_VERS=$(cat /lib/firmware/updates/brcm/"$BASE"*.bin 2>/dev/null | fw_versions)
+
+  # Both ESP copies, because a re-install consumes them: the Asahi installer's
+  # (the macOS version it pins for its stub) and the live capture, if any.
+  ASAHI_VERS=""
+  [ -f /boot/efi/vendorfw/firmware.cpio ] && [ -n "$BASE" ] && \
+    ASAHI_VERS=$(cpio -i --to-stdout "*${BASE}*" \
+                 < /boot/efi/vendorfw/firmware.cpio 2>/dev/null | fw_versions)
+  LIVE_VERS=""
+  [ -f /boot/efi/asahi/all_firmware-live.tar.gz ] && [ -n "$CHIP" ] && \
+    LIVE_VERS=$(tar xzOf /boot/efi/asahi/all_firmware-live.tar.gz \
+                  --wildcards "*${CHIP}*" 2>/dev/null | fw_versions)
+
+  # Live wins when both hold it: that is the one a re-install would take.
+  STATE=MISMATCH
+  if [ -n "$RUN_VER" ]; then
+    if   fw_has "$LIVE_VERS" "$RUN_VER"; then STATE=Live
+    elif fw_has "$ASAHI_VERS" "$RUN_VER"; then STATE=Asahi
+    fi
+  fi
+
+  # ---- evidence, gathered here so each gate line can show it ----------------
+  #
+  # The tool ANSWERS a gate only where its evidence cannot be read two ways:
+  # the renderer string (5a), speakersafetyd's own status (7), and a model for
+  # which asahi-audio ships no DSP profile at all (5b). Everything else is the
+  # tester's answer, with the evidence printed beside it: the tool cannot know
+  # how every model reports these, so it does not guess.
+  #
+  # 5b's key is the one asahi-audio matches on: the sound card, which the
+  # kernel names after the last word of the device tree's /sound model
+  # ("Mac mini J473" makes AppleJ473). Not the j-code in the root compatible:
+  # Macs with a Pro, Max or Ultra chip carry a suffix there ("j314s") that
+  # neither the card nor asahi-audio's profiles do.
+  # stderr is redirected before the input: an M3 has no /sound, and the shell
+  # reports a failed `<` on whichever stderr is in place when it gets there.
+  SNDKEY=$(tr -d '\0' 2>/dev/null < /proc/device-tree/sound/model \
+             | awk '{print tolower($NF)}')
+
+  # 5a. The GL renderer: the first one `eglinfo -B` names, which works as root
+  # and from a console, with no display server (there it is the GBM
+  # platform's). "Apple ..." is the asahi driver; llvmpipe/softpipe is software
+  # rendering, i.e. no acceleration, and would be named first too.
+  _rend=$(eglinfo -B 2>/dev/null | sed -n 's/^OpenGL .*profile renderer: //p' | head -1)
+  case "$_rend" in
+    "Apple "*)                       _a5a="yes (auto)" ;;
+    *llvmpipe*|*softpipe*|*swrast*)  _a5a="no (auto)" ;;
+    *)                               _a5a="yes/no" ;;
+  esac
+
+  # 5b. asahi-audio names its DSP output after the model; the raw device is
+  # "Raw Speaker Device (do not use)". A model with no profile has no DSP to
+  # test (the M1 iMac, today), which is the one unambiguous answer here.
+  _dsp=$(ls /usr/share/asahi-audio/"$SNDKEY"/graph.json \
+            /usr/share/asahi-audio/*/graph-"$SNDKEY".json 2>/dev/null | head -1)
+  if [ -n "$_dsp" ]; then
+    _a5b="yes/no"
+    _e5b="output should read \"$(sed -n 's/^ *"node.description": *"\(.*\)",*$/\1/p' "$_dsp" | head -1)\""
+  else
+    _a5b="N/A (auto)"
+    _e5b="asahi-audio has no DSP profile for ${SNDKEY:-this model}"
+  fi
+
+  # 5c-5e. Link state only: no SSID and no addresses -- either can identify
+  # where the tester is, and this block is pasted into public issues.
+  _wassoc=$(iw dev wlan0 link 2>/dev/null | grep -q '^Connected' && echo associated || echo "not associated")
+  _btc=$(ls /sys/class/bluetooth 2>/dev/null | grep -v ':' | xargs)
+  _btn=$(ls /sys/class/bluetooth 2>/dev/null | grep -c ':')
+
+  # 7. The criterion is literally this script's own check, decided by its exit
+  # status and never its words: "speakers are NOT protected" says "protected".
+  # It exits 0 when the daemon runs, 3 where it is not used on this machine
+  # (TESTING.md makes the gate N/A there), and otherwise when it should run and
+  # does not.
+  if [ -x /etc/rc.d/rc.speakersafetyd ]; then
+    /etc/rc.d/rc.speakersafetyd status >/dev/null 2>&1
+    case $? in
+      0) _spk=protected;                  _a7="yes (auto)" ;;
+      3) _spk="not used on this machine"; _a7="N/A (auto)" ;;
+      *) _spk="not protected";            _a7="no (auto)" ;;
+    esac
+  elif [ -e /etc/rc.d/rc.speakersafetyd ]; then
+    _spk="disabled: rc.speakersafetyd is not executable"; _a7="no (auto)"
+  else
+    _spk="not installed"; _a7="no (auto)"
+  fi
+
+  # 8. The internal panel's preferred mode, and whether a backlight exists.
+  _pmode=""
+  for _c in /sys/class/drm/card*-eDP-* /sys/class/drm/card*-DSI-*; do
+    [ -r "$_c/modes" ] || continue
+    _pmode=$(head -1 "$_c/modes"); [ -n "$_pmode" ] && break
+  done
+  _bl=$(ls /sys/class/backlight 2>/dev/null | xargs)
+
+  # 12. Battery and AC as the kernel reports them, by power_supply type.
+  _bat=""; _ac=""
+  for _p in /sys/class/power_supply/*; do
+    case "$(cat "$_p/type" 2>/dev/null)" in
+      Battery) _bat="$(cat "$_p/capacity" 2>/dev/null)% $(cat "$_p/status" 2>/dev/null)" ;;
+      Mains)   _ac="AC online=$(cat "$_p/online" 2>/dev/null)" ;;
+    esac
+  done
+  _reg=$(iw reg get 2>/dev/null | sed -n 's/^country \([A-Z0-9]*\).*/\1/p' | head -1)
+
+  gate() {  # number, label, answer, evidence
+    _g=$(printf '%-5s %s %s' "[$1]" "$2" "$(printf '%*s' $((34 - ${#2})) '' | tr ' ' '.')")
+    if [ -n "${4:-}" ]; then printf '%s  %-10s (%s)\n' "$_g" "$3" "$4"
+    else                     printf '%s  %s\n' "$_g" "$3"; fi
+  }
+
+  echo
+  echo "Copy everything between START and END, answer the lines that need it, and send it."
+  echo
+  echo "----- START -----"
+  echo "slackware-aarch64-mac test report"
+  printf 'model      %s  [%s]\n' "$MODEL" \
+    "$(tr '\0' ' ' < /proc/device-tree/compatible 2>/dev/null | sed 's/  *$//')"
+  printf 'kernel     %s  %s\n' "$(uname -r)" \
+    "$(sed -E 's/.*\) (#[0-9]+.*)$/\1/' /proc/version 2>/dev/null)"
+  printf 'checks     %s passed, %s failed\n' "$pass" "$fail"
+  printf 'regdom     %s\n' "${_reg:-unset}"
+  echo
+  printf 'Firmware comparison state: %s\n' "$STATE"
+  printf '  %-13s %s  %s\n' running "${RUN_DATE:-unknown}" "${RUN_VER:-unknown}"
+  fw_row installed      "$INST_VERS"
+  fw_row "esp live"     "$LIVE_VERS"
+  fw_row "esp asahi"    "$ASAHI_VERS"
+  echo
+  echo "Answer yes, no or N/A. Lines marked (auto) are answered already. A gate is"
+  echo "N/A where upstream lists the feature as not working on your model, or where"
+  echo "your machine does not have the hardware."
+  echo
+  echo "release tag .............................  <NEEDED>"
+  gate 1  "install completed unaided"     "yes/no"
+  gate 2  "boots with media removed"      "yes/no"
+  gate 3  "survives a cold boot"          "yes/no"
+  gate 4  "sleeps and wakes"              "yes/no" \
+    "this boot: $(cat /sys/power/suspend_stats/success 2>/dev/null) ok, $(cat /sys/power/suspend_stats/fail 2>/dev/null) failed"
+  gate 5a "GPU accelerated"               "$_a5a"  "renderer: ${_rend:-unknown}"
+  gate 5b "audio DSP output listed"       "$_a5b"  "$_e5b"
+  gate 5c "Wi-Fi works"                   "yes/no" "wlan0 $(link wlan0), $_wassoc"
+  gate 5d "Bluetooth works"               "yes/no" "${_btc:-no controller}${_btc:+, $_btn connected}"
+  gate 5e "Ethernet works"                "yes/no" "eth0 $(link eth0)"
+  gate 6  "associates to an enterprise AP" "yes/no"
+  gate 7  "speakersafetyd protected"      "$_a7"   "$_spk"
+
+  # Which built-in hardware to ask about, decided by the MODEL STRING and never
+  # by probing for the hardware. A broken component is exactly what a tester
+  # needs to report, so detecting its absence would silence the question that
+  # matters. Hide only what we know is not there.
+  case "$MODEL" in
+    *[Mm]ini*|*[Ss]tudio*|*"Mac Pro"*) ;;           # no built-in display or mic
+    *)
+      gate 8  "panel native resolution, backlight" "yes/no" \
+        "panel ${_pmode:-mode not found}; backlight ${_bl:-not found}"
+      gate 9  "internal microphone captures"  "yes/no"
+      case "$MODEL" in
+        *[Ii][Mm]ac*) ;;                            # panel and mic, no lid
+        *)
+          gate 10 "keyboard and trackpad work"    "yes/no"
+          gate 11 "lid close sleeps, open wakes"  "yes/no"
+          gate 12 "battery: level, AC, charging"  "yes/no" \
+            "${_bat:-no battery reported}${_ac:+; $_ac}"
+          ;;
+      esac
+      ;;
+  esac
+
+  echo
+  echo "Detail every no. Anything else working or failing, including features"
+  echo "upstream lists as not working on your model:"
+  echo
+  echo "----- END -----"
+fi
+
+[ "$fail" -eq 0 ] || exit 1

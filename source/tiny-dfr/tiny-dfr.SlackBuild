@@ -1,0 +1,161 @@
+#!/bin/bash
+
+# Slackware build script for tiny-dfr (Touch Bar daemon for Apple Silicon)
+
+# Copyright 2026  Jim Phoenix, Earth, Milky Way
+# All rights reserved.
+#
+# Redistribution and use of this script, with or without modification, is
+# permitted provided that the following conditions are met:
+#
+# 1. Redistributions of this script must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+#
+#  THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR IMPLIED
+#  WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+#  MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO
+#  EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+#  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+#  PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+#  OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+#  WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+#  OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+#  ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+# WHY: the 13-inch M1 and M2 MacBook Pro have a Touch Bar, and it is where
+# their function, media and brightness keys are. The kernel side is in
+# kernel_armv8-mac (DRM_ADP for its display, TOUCHSCREEN_APPLE_Z2 for its
+# digitizer, whose firmware vendorfw-install-mac installs); this is the
+# userspace half upstream ships: it draws the keys and turns touches into key
+# presses through uinput.
+#
+# Ported from AsahiLinux/PKGBUILDs tiny-dfr at commit cfe631b8, including its
+# one carried patch, 81.patch (Davide Cavalca), applied verbatim.
+#
+# INIT SYSTEM (see docs/PORTING.md, "Init system"). Upstream targets systemd;
+# tools/check-init-deps.sh --source reports five findings, each handled here:
+#   tiny-dfr.service                 -> NOT installed. /etc/rc.d/rc.tiny-dfr
+#                                       instead, started at boot from
+#                                       /etc/rc.d/rc.platform.d/aarch64/.
+#   99-touchbar-tiny-dfr.rules       -> NOT installed. Every line is a
+#                                       systemd trigger or device alias, plus
+#                                       one line for Intel T2 Macs.
+#   systemd-backlight@*.service      -> NOT installed: systemd's brightness
+#                                       save/restore.
+#   99-touchbar-seat.rules           -> installed verbatim. It keeps the
+#                                       desktop from treating the Touch Bar as
+#                                       a screen and a touchscreen.
+#
+# RUST: upstream's PKGBUILD pins rustc 1.93.1 through rustup; Slackware has no
+# rustup, so the system rustc is used (as for the kernel and speakersafetyd).
+# The crate's dependencies come from crates.io, so the build needs network
+# access -- it is NOT an offline build.
+#
+# Build deps: rust (cargo), cairo, pango, librsvg, gdk-pixbuf2, libinput,
+# freetype, fontconfig, eudev (libudev) -- all stock Slackware.
+#
+# Run tools/fetch-sources.sh tiny-dfr to populate sources/.
+
+cd $(dirname $0) ; CWD=$(pwd)
+
+PRGNAM=tiny-dfr
+VERSION=${VERSION:-0.3.7}
+BUILD=${BUILD:-1}
+TAG=${TAG:-_mac}
+
+if [ -z "$ARCH" ]; then
+  ARCH=$( uname -m )
+fi
+
+if [ ! -z "${PRINT_PACKAGE_NAME}" ]; then
+  echo "$PRGNAM-$VERSION-$ARCH-$BUILD$TAG.txz"
+  exit 0
+fi
+
+if [ "$( uname -m )" != "aarch64" ]; then
+  echo "$PRGNAM: this package is Apple Silicon only; build on aarch64." >&2
+  exit 1
+fi
+
+TMP=${TMP:-/tmp/mac}
+PKG=$TMP/package-$PRGNAM
+OUTPUT=${OUTPUT:-/tmp}
+
+set -e
+
+rm -rf $PKG
+mkdir -p $TMP $PKG $OUTPUT
+cd $TMP
+rm -rf $PRGNAM-$VERSION
+tar xf $CWD/sources/$PRGNAM-$VERSION.crate
+cd $PRGNAM-$VERSION
+
+chown -R root:root .
+find . \( -type f -o -type d \) \
+ \( \( -perm 777 -o -perm 775 -o -perm 711 -o -perm 555 -o -perm 511 \) \
+ -exec chmod 755 {} \+ -o \
+ \( -perm 666 -o -perm 664 -o -perm 600 -o -perm 444 -o -perm 440 -o -perm 400 \) \
+ -exec chmod 644 {} \+ \)
+
+# Upstream's carried patch: a battery-state fallback for all architectures.
+patch -p1 --fuzz=0 --no-backup-if-mismatch -i $CWD/patches/81.patch
+
+cargo build --release --locked --all-features
+
+install -Dm755 target/release/$PRGNAM $PKG/usr/bin/$PRGNAM
+strip --strip-unneeded $PKG/usr/bin/$PRGNAM 2>/dev/null || true
+mkdir -p $PKG/usr/share/$PRGNAM
+install -m644 share/$PRGNAM/* $PKG/usr/share/$PRGNAM/
+install -Dm644 etc/udev/rules.d/99-touchbar-seat.rules \
+  $PKG/lib/udev/rules.d/99-touchbar-seat.rules
+
+# Sanity: the binary, its default config, and a seat rule with nothing
+# systemd-only in it -- the one rule shipped has to work under eudev as is.
+[ -x "$PKG/usr/bin/$PRGNAM" ] || { echo "$PRGNAM: binary missing" >&2; exit 1; }
+[ -s "$PKG/usr/share/$PRGNAM/config.toml" ] \
+  || { echo "$PRGNAM: config.toml missing" >&2; exit 1; }
+grep -qE 'SYSTEMD|TAG\+?="systemd"' $PKG/lib/udev/rules.d/99-touchbar-seat.rules \
+  && { echo "$PRGNAM: the seat rule now carries systemd-only lines" >&2; exit 1; }
+
+# The Slackware replacement for the systemd unit, shipped as .new and
+# executable, so a fresh install is enabled; doinst.sh installs it with stock's
+# preserve_perms(), so an upgrade keeps the admin's mode. See doinst.sh for why
+# it is enabled by default.
+mkdir -p $PKG/etc/rc.d
+install -m755 $CWD/rc.tiny-dfr $PKG/etc/rc.d/rc.tiny-dfr.new
+
+# The boot hook: a package file in Slackware ARM's hardware-model hook
+# directory, sourced by rc.platform just before rc.local. Not .new and mode
+# 644, as Stuart's own helpers are; speakersafetyd.SlackBuild has the reasoning.
+install -Dm644 $CWD/rc.platform.d-$PRGNAM $PKG/etc/rc.d/rc.platform.d/aarch64/$PRGNAM
+bash -n $PKG/etc/rc.d/rc.platform.d/aarch64/$PRGNAM \
+  || { echo "$PRGNAM: the boot hook does not parse" >&2; exit 1; }
+grep -qF '/etc/rc.d/rc.tiny-dfr start' $PKG/etc/rc.d/rc.platform.d/aarch64/$PRGNAM \
+  || { echo "$PRGNAM: the boot hook no longer starts rc.tiny-dfr" >&2; exit 1; }
+grep -vE '^[[:space:]]*#' $CWD/doinst.sh | grep -qF 'etc/rc.d/rc.local' \
+  && { echo "$PRGNAM: doinst.sh writes rc.local again -- that leaves rc.local.new behind" >&2; exit 1; }
+
+# The daemon's log is appended to by the rc script and never rotated by the
+# daemon itself, so ship a logrotate entry, as stock's wpa_supplicant does:
+# .new, installed by config() in doinst.sh. copytruncate, because the daemon
+# keeps the file open.
+install -Dm644 $CWD/logrotate.d-$PRGNAM $PKG/etc/logrotate.d/$PRGNAM.new
+grep -qx '    copytruncate' $PKG/etc/logrotate.d/$PRGNAM.new \
+  || { echo "$PRGNAM: the logrotate entry does not use copytruncate" >&2; exit 1; }
+grep -qF "config etc/logrotate.d/$PRGNAM.new" $CWD/doinst.sh \
+  || { echo "$PRGNAM: doinst.sh does not install the logrotate entry" >&2; exit 1; }
+
+mkdir -p $PKG/usr/doc/$PRGNAM-$VERSION
+cp -a LICENSE LICENSE.material README.md $PKG/usr/doc/$PRGNAM-$VERSION
+cp -a $CWD/patches/81.patch $PKG/usr/doc/$PRGNAM-$VERSION/
+cat $CWD/$PRGNAM.SlackBuild > $PKG/usr/doc/$PRGNAM-$VERSION/$PRGNAM.SlackBuild
+# Slackware ARM's slack644docs: every doc file 0644. cp -a keeps a source's own
+# mode, and a patch checked out of this tree can arrive group-writable.
+find $PKG/usr/doc -type f -exec chmod 644 {} \+
+
+mkdir -p $PKG/install
+cat $CWD/slack-desc > $PKG/install/slack-desc
+cat $CWD/doinst.sh > $PKG/install/doinst.sh
+
+cd $PKG
+/sbin/makepkg -l y -c n $OUTPUT/$PRGNAM-$VERSION-$ARCH-$BUILD$TAG.txz

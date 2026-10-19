@@ -1,0 +1,19 @@
+# HOW TO EDIT THIS FILE:
+# The "handy ruler" below makes it easier to edit a package description.
+# Line up the first '|' above the ':' following the base package name, and
+# the '|' on the right side marks the last column you can put a character in.
+# You must make exactly 11 lines for the formatting to be correct. It's also
+# customary to leave one space after the ':' except on otherwise blank lines.
+
+               |-----handy-ruler------------------------------------------------------|
+asahi-fwextract: asahi-fwextract (Apple Silicon firmware extractor)
+asahi-fwextract:
+asahi-fwextract: Unpacks Apple's machine-specific Wi-Fi, Bluetooth and other vendor
+asahi-fwextract: firmware, from the copy the Asahi installer left on the EFI
+asahi-fwextract: partition or a capture from macOS, so Linux can drive the hardware.
+asahi-fwextract: It is not redistributable, so it is unpacked on the target Mac.
+asahi-fwextract:
+asahi-fwextract: Requires: python3 and lzfse.
+asahi-fwextract:
+asahi-fwextract: Homepage: https://asahilinux.org/
+asahi-fwextract: Needed for a macOS Wi-Fi/Bluetooth capture, and by asahi-fwupdate.

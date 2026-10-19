@@ -1,0 +1,105 @@
+#!/bin/bash
+
+# Slackware build script for alsa-ucm-conf-asahi
+# (ALSA Use Case Manager profiles for Apple Silicon audio)
+
+# Copyright 2026  Jim Phoenix, Earth, Milky Way
+# All rights reserved.
+#
+# Redistribution and use of this script, with or without modification, is
+# permitted provided that the following conditions are met:
+#
+# 1. Redistributions of this script must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+#
+#  THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR IMPLIED
+#  WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+#  MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO
+#  EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+#  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+#  PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+#  OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+#  WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+#  OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+#  ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+# Data only -- no compilation.  Installs the UCM profiles that tell ALSA how
+# the Apple Silicon audio hardware is wired (macaudio for the speakers/jack,
+# aop_audio for the always-on processor microphone).
+#
+# Slackware provides /usr/share/alsa/ucm2 from the alsa-lib package and ships no
+# Apple profiles, so this drops into conf.d/ alongside the stock ones without
+# conflicting with anything.
+#
+# Upstream declares depends=alsa-ucm-conf>=1.2.7.2.  Slackware has no separate
+# alsa-ucm-conf package -- the UCM tree is bundled in alsa-lib -- so that
+# dependency is satisfied by alsa-lib and is not a gap.
+#
+# 'noarch': configuration files only.
+#
+# NOTE: this package is only half of working audio.  The routing/DSP side is
+# asahi-audio, packaged here along with the three LV2 plugin packages it needs
+# (bankstown, lsp-plugins-lv2, triforce-lv2).  Speaker PROTECTION is separate
+# again and comes from speakersafetyd, which must be running before audio is
+# used.
+#
+# Run tools/fetch-sources.sh alsa-ucm-conf-asahi to populate sources/.
+
+cd $(dirname $0) ; CWD=$(pwd)
+
+PRGNAM=alsa-ucm-conf-asahi
+VERSION=${VERSION:-8}
+BUILD=${BUILD:-1}
+TAG=${TAG:-_mac}
+ARCH=noarch
+
+SRCNAM=$PRGNAM-$VERSION
+
+if [ ! -z "${PRINT_PACKAGE_NAME}" ]; then
+  echo "$PRGNAM-$VERSION-$ARCH-$BUILD$TAG.txz"
+  exit 0
+fi
+
+TMP=${TMP:-/tmp/mac}
+PKG=$TMP/package-$PRGNAM
+OUTPUT=${OUTPUT:-/tmp}
+
+set -e
+
+rm -rf $PKG
+mkdir -p $TMP $PKG $OUTPUT
+cd $TMP
+rm -rf $SRCNAM
+tar xf $CWD/sources/$PRGNAM-$VERSION.tar.gz
+cd $SRCNAM
+
+chown -R root:root .
+find . \( -type f -o -type d \) \
+ \( \( -perm 777 -o -perm 775 -o -perm 711 -o -perm 555 -o -perm 511 \) \
+ -exec chmod 755 {} \+ -o \
+ \( -perm 666 -o -perm 664 -o -perm 600 -o -perm 444 -o -perm 440 -o -perm 400 \) \
+ -exec chmod 644 {} \+ \)
+
+install -dm755 $PKG/usr/share/alsa/ucm2/conf.d
+cp -a ucm2/conf.d/macaudio   $PKG/usr/share/alsa/ucm2/conf.d/
+cp -a ucm2/conf.d/aop_audio  $PKG/usr/share/alsa/ucm2/conf.d/
+
+# Sanity: an empty profile set would look installed but do nothing.
+n=$(find $PKG/usr/share/alsa/ucm2/conf.d -name '*.conf' | wc -l)
+[ "$n" -gt 0 ] || { echo "$PRGNAM: no UCM profiles installed" >&2; exit 1; }
+echo "$PRGNAM: installed $n UCM profile files"
+
+# Upstream names them LICENSE.asahi and README.asahi. The licence is BSD
+# 3-Clause, whose notice must travel with every copy, so a missing one fails
+# the build instead of vanishing behind the || true.
+mkdir -p $PKG/usr/doc/$PRGNAM-$VERSION
+cp -a LICENSE* README* $PKG/usr/doc/$PRGNAM-$VERSION 2>/dev/null || true
+ls $PKG/usr/doc/$PRGNAM-$VERSION/LICENSE* >/dev/null 2>&1 \
+  || { echo "$PRGNAM: the licence is not in the package" >&2; exit 1; }
+cat $CWD/$PRGNAM.SlackBuild > $PKG/usr/doc/$PRGNAM-$VERSION/$PRGNAM.SlackBuild
+
+mkdir -p $PKG/install
+cat $CWD/slack-desc > $PKG/install/slack-desc
+
+cd $PKG
+/sbin/makepkg -l y -c n $OUTPUT/$PRGNAM-$VERSION-$ARCH-$BUILD$TAG.txz

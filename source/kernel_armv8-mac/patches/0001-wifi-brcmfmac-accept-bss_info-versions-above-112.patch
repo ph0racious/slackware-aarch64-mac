@@ -1,0 +1,33 @@
+wifi: brcmfmac: accept bss_info versions above 112
+
+Apple's Wi-Fi firmware from macOS Tahoe (26.x) reports a bss_info struct
+version of 116. brcmfmac rejects anything outside 109..112, so every scan
+fails with
+
+  brcmf_inform_bss: BSS info version 116 unsupported
+
+and the interface returns no results at all -- Wi-Fi is completely dead. This
+affects any machine whose vendor firmware has been extracted from a recent
+macOS, and it is silent: scans simply come back empty.
+
+The struct is append-only. Hector Martin, on the thread that added v112
+support, notes that "the offsets of the subsequent fields ... haven't
+changed", and that older versions were retrofitted as compatible with newer
+ones on exactly that basis:
+
+  https://lkml.iu.edu/hypermail/linux/kernel/2311.0/05603.html
+
+The fields brcmfmac reads therefore sit at fixed offsets and newer revisions
+only append, so raising the ceiling is safe rather than speculative.
+
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h
+@@ -19,7 +19,7 @@
+ #define BRCMF_ARP_OL_PEER_AUTO_REPLY	0x00000008
+
+ #define	BRCMF_BSS_INFO_MIN_VERSION	109 /* min ver of brcmf_bss_info_le struct */
+-#define	BRCMF_BSS_INFO_MAX_VERSION	112 /* max ver of brcmf_bss_info_le struct */
++#define	BRCMF_BSS_INFO_MAX_VERSION	116 /* max ver of brcmf_bss_info_le struct */
+ #define BRCMF_BSS_RSSI_ON_CHANNEL	0x0004
+
+ #define BRCMF_STA_BRCM			0x00000001	/* Running a Broadcom driver */

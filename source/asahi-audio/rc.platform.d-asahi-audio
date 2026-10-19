@@ -1,0 +1,8 @@
+# /etc/rc.d/rc.platform.d/aarch64/asahi-audio
+#
+# Sourced by /etc/rc.d/rc.platform, which rc.M runs just before rc.local.
+# Asahi audio: keeps PulseAudio autostart disabled so PipeWire serves audio.
+# Managed by the asahi-audio package. To disable the service:
+#   chmod -x /etc/rc.d/rc.asahi-audio
+# Upgrading the package leaves it disabled.
+[ -x /etc/rc.d/rc.asahi-audio ] && /etc/rc.d/rc.asahi-audio start

@@ -1,0 +1,135 @@
+#!/bin/bash
+
+# Slackware build script for asahi-scripts (Apple Silicon maintenance scripts)
+
+# Copyright 2026  Jim Phoenix, Earth, Milky Way
+# All rights reserved.
+#
+# Redistribution and use of this script, with or without modification, is
+# permitted provided that the following conditions are met:
+#
+# 1. Redistributions of this script must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+#
+#  THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR IMPLIED
+#  WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+#  MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO
+#  EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+#  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+#  PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+#  OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+#  WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+#  OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+#  ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+# asahi-scripts upstream targets Arch and Fedora: its install-arch / install-
+# fedora targets drop systemd units, dracut modules, mkinitcpio hooks and
+# pacman (libalpm) hooks into the system.  Slackware uses none of those, so we
+# deliberately use only the base `install` target, which installs the portable,
+# init-system-agnostic pieces:
+#
+#   /usr/bin/update-m1n1     the boot.bin assembler (the reason this package
+#                            exists for us)
+#   /usr/bin/asahi-diagnose  support/diagnostic dump
+#   /usr/bin/asahi-fwupdate  vendor firmware refresh (runs asahi-fwextract)
+#   /usr/share/asahi-scripts/functions.sh   sourced by update-m1n1
+#
+# We then add our own /etc/default/update-m1n1 config (shipped .new so it never
+# clobbers a user edit) pointing DTBS at the newest installed kernel's device
+# trees, as upstream's Arch package does; the file says why not U-Boot's.  The
+# initrd/dracut integration is intentionally omitted: this port boots without an
+# initrd.
+#
+# Nothing runs update-m1n1 during install. A fresh install boots the stage 2
+# payload the Asahi installer wrote; update-m1n1 is how it is replaced.
+#
+# 'noarch': every installed file is a shell script or config; nothing compiled.
+
+cd $(dirname $0) ; CWD=$(pwd)
+
+PRGNAM=asahi-scripts
+VERSION=${VERSION:-20260127.1}
+BUILD=${BUILD:-1}
+TAG=${TAG:-_mac}
+# Portable shell scripts only -- one package works on every arch.
+ARCH=noarch
+
+if [ ! -z "${PRINT_PACKAGE_NAME}" ]; then
+  echo "$PRGNAM-$VERSION-$ARCH-$BUILD$TAG.txz"
+  exit 0
+fi
+
+TMP=${TMP:-/tmp/mac}
+PKG=$TMP/package-$PRGNAM
+OUTPUT=${OUTPUT:-/tmp}
+
+SRCNAM=$PRGNAM-$VERSION
+
+set -e
+
+rm -rf $PKG
+mkdir -p $TMP $PKG $OUTPUT
+cd $TMP
+rm -rf $SRCNAM
+tar xf $CWD/sources/$SRCNAM.tar.gz
+cd $SRCNAM
+
+chown -R root:root .
+find . \
+ \( -perm 777 -o -perm 775 -o -perm 711 -o -perm 555 -o -perm 511 \) \
+ -exec chmod 755 {} \+ -o \
+ \( -perm 666 -o -perm 664 -o -perm 600 -o -perm 444 -o -perm 440 -o -perm 400 \) \
+ -exec chmod 644 {} \+
+
+# asahi-diagnose only knows Arch and Fedora; on Slackware its package-versions
+# section prints "Distribution not supported" and returns. Everything else in
+# the report is distribution-agnostic and correct, so this is a small gap in a
+# tool we ship rather than a porting workaround -- an upstream gap; drop this
+# patch when upstream supports Slackware.
+patch -p1 --fuzz=0 --no-backup-if-mismatch \
+  -i $CWD/patches/0001-asahi-diagnose-support-slackware.patch
+
+# Base install target only.  CONFIG_DIR keeps update-m1n1 sourcing
+# /etc/default/update-m1n1, which is where we ship our config.
+make PREFIX=/usr DESTDIR=$PKG CONFIG_DIR=/etc/default install
+
+# The patch must actually have reached the INSTALLED file, not merely the build
+# tree: `make install` could plausibly regenerate or substitute this script, and
+# a patch that applies but does not ship is the silent-failure shape this tree
+# tries to eliminate. Assert against $PKG, and assert both halves -- the branch
+# that selects Slackware and the helper it depends on. Checking only one would
+# still pass if the other were dropped in a rebase.
+DIAG=$PKG/usr/bin/asahi-diagnose
+[ -f "$DIAG" ] || { echo "$PRGNAM: asahi-diagnose not installed" >&2; exit 1; }
+grep -q '/etc/slackware-version' "$DIAG" \
+  || { echo "$PRGNAM: asahi-diagnose has no Slackware branch" >&2; exit 1; }
+grep -q '^slackware_pkgs()' "$DIAG" \
+  || { echo "$PRGNAM: asahi-diagnose lost the slackware_pkgs helper" >&2; exit 1; }
+sh -n "$DIAG" \
+  || { echo "$PRGNAM: patched asahi-diagnose does not parse as sh" >&2; exit 1; }
+echo "$PRGNAM: asahi-diagnose knows Slackware"
+
+# Ship our Slackware config as .new so upgrades never overwrite local edits.
+mkdir -p $PKG/etc/default
+install -m644 $CWD/update-m1n1.default $PKG/etc/default/update-m1n1.new
+# The device trees are what the running kernel is told the machine contains.
+# U-Boot's mainline set under /usr/lib/asahi-boot/dtb lacks the display
+# controller, the sound card and the M2 laptops' keyboard, so a stage 2 built
+# from it boots a machine without them. Assert the config names the kernel's.
+grep -qE '^DTBS=.*/lib/modules/\*-armv8-mac.*/dtbs/\*\.dtb' $PKG/etc/default/update-m1n1.new \
+  || { echo "$PRGNAM: update-m1n1 config no longer takes the kernel's device trees" >&2; exit 1; }
+grep -qE '^DTBS=.*asahi-boot/dtb' $PKG/etc/default/update-m1n1.new \
+  && { echo "$PRGNAM: update-m1n1 config points DTBS at U-Boot's device trees" >&2; exit 1; }
+sh -n $PKG/etc/default/update-m1n1.new \
+  || { echo "$PRGNAM: update-m1n1 config does not parse" >&2; exit 1; }
+
+mkdir -p $PKG/usr/doc/$PRGNAM-$VERSION
+cp -a LICENSE README.md $PKG/usr/doc/$PRGNAM-$VERSION 2>/dev/null || true
+cat $CWD/$PRGNAM.SlackBuild > $PKG/usr/doc/$PRGNAM-$VERSION/$PRGNAM.SlackBuild
+
+mkdir -p $PKG/install
+cat $CWD/slack-desc > $PKG/install/slack-desc
+cat $CWD/doinst.sh > $PKG/install/doinst.sh
+
+cd $PKG
+/sbin/makepkg -l y -c n $OUTPUT/$PRGNAM-$VERSION-$ARCH-$BUILD$TAG.txz

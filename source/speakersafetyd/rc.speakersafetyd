@@ -1,0 +1,131 @@
+#!/bin/sh
+#
+# /etc/rc.d/rc.speakersafetyd
+#
+# Slackware SysV init script for the Asahi speaker protection daemon.
+#
+# WHY THIS EXISTS: upstream ships speakersafetyd.service (systemd) and a udev
+# rule that launches it via ENV{SYSTEMD_WANTS}. Both are INERT on Slackware --
+# the rule matches, and then nothing happens. This script starts the daemon
+# where that rule asks for it, and nowhere else; see ss_needed(). Without this
+# script the daemon never starts, no error is reported, and Asahi's kernel
+# driver keeps the speakers at a reduced volume; the daemon is what lifts that
+# limit while it monitors them.
+#
+# Differences from the systemd unit, and why:
+#   RuntimeDirectory=speakersafetyd  -> we mkdir /run/speakersafetyd ourselves.
+#                                       The daemon records a cold boot in its
+#                                       flag file there (without it, every
+#                                       start counts as warm: speakers fully
+#                                       limited), and this script keeps its
+#                                       pid file there.
+#   DynamicUser=/User=speakersafetyd -> Slackware has no equivalent, so we run
+#                                       as root. Deliberate and documented; the
+#                                       daemon needs ALSA control access anyway.
+#   AmbientCapabilities=CAP_SYS_NICE -> implicit when running as root.
+#   Restart=on-failure               -> no SysV equivalent. 'restart' is manual.
+#                                       Check 'status' if audio behaves oddly.
+#   journald                         -> the daemon's output is appended to
+#                                       $LOG. Started from the boot scripts it
+#                                       would otherwise go to /dev/console,
+#                                       landing on whatever VT is showing and
+#                                       then lost.
+
+DAEMON=/usr/bin/speakersafetyd
+CONFIG_DIR=/usr/share/speakersafetyd/
+MAX_REDUCTION=7          # upstream's shipped value (-m, --max-reduction)
+RUNDIR=/run/speakersafetyd
+PIDFILE=$RUNDIR/speakersafetyd.pid
+LOG=/var/log/speakersafetyd.log
+
+ss_running() {
+  # The recorded pid must be the daemon, not merely alive: after a crash the
+  # pid file stays behind, and once its pid is reused kill -0 would take that
+  # process for the daemon, and stop would kill it. Checked the way stock's
+  # rc.dnsmasq checks its own pid file.
+  [ -s "$PIDFILE" ] || return 1
+  pgrep -l -F "$PIDFILE" 2>/dev/null | grep -q speakersafetyd
+}
+
+# WHERE IT RUNS IS UPSTREAM'S DECISION. Upstream starts the daemon from its
+# own udev rule, shipped unchanged as /lib/udev/rules.d/95-speakersafetyd.rules:
+# it matches the speaker-sense PCM (pcmC*D2c) of an AppleJ* card, one line per
+# model Asahi has validated, and asks systemd for the service. eudev applies
+# the same rule and records that request on the device, so the daemon starts
+# exactly where upstream's would. A Mac whose kernel drives no speakers has no
+# such PCM; a model upstream has not validated is commented out of the rule.
+ss_needed() {
+  ss_why="the kernel drives no speakers on this machine"
+  for _pcm in /sys/class/sound/pcmC*D2c; do
+    case "$(cat "$_pcm/../id" 2>/dev/null)" in AppleJ*) ;; *) continue ;; esac
+    udevadm info --query=property --path="$_pcm" 2>/dev/null \
+      | grep -qE '^SYSTEMD_WANTS=(.* )?speakersafetyd\.service( |$)' && return 0
+    ss_why="Asahi does not run it on this model yet"
+  done
+  return 1
+}
+
+ss_start() {
+  if ss_running; then
+    echo "speakersafetyd is already running (pid $(cat $PIDFILE))."
+    return 0
+  fi
+  ss_needed || { echo "speakersafetyd: $ss_why, not starting."; return 0; }
+  if [ ! -x "$DAEMON" ]; then
+    echo "speakersafetyd: $DAEMON not found or not executable." 1>&2
+    return 1
+  fi
+  # systemd's RuntimeDirectory= equivalent: the daemon's flag file and this
+  # script's pid file live here.
+  mkdir -p "$RUNDIR"
+  chmod 0755 "$RUNDIR"
+  echo "Starting speaker protection daemon:  $DAEMON -c $CONFIG_DIR -m $MAX_REDUCTION"
+  "$DAEMON" -c "$CONFIG_DIR" -m "$MAX_REDUCTION" >> "$LOG" 2>&1 &
+  echo $! > "$PIDFILE"
+  # Give it a moment, then confirm it actually stayed up: this daemon exits if
+  # it cannot identify the machine or find a matching speaker config, and a
+  # silent exit is precisely the failure we must not ship.
+  sleep 1
+  if ss_running; then
+    echo "speakersafetyd started (pid $(cat $PIDFILE))."
+  else
+    rm -f "$PIDFILE"
+    echo "speakersafetyd FAILED to stay running -- speakers are NOT protected." 1>&2
+    echo "See $LOG for why." 1>&2
+    return 1
+  fi
+}
+
+ss_stop() {
+  if ss_running; then
+    echo "Stopping speakersafetyd."
+    kill "$(cat "$PIDFILE")" 2>/dev/null
+    sleep 1
+    ss_running && kill -9 "$(cat "$PIDFILE")" 2>/dev/null
+  fi
+  rm -f "$PIDFILE"
+}
+
+# status exits 0 when the daemon runs, 3 where it is not used on this machine
+# (LSB's "not running", which stock's rc.sysstat also returns), and 1 when it
+# should be running and is not. verify-install-mac's gate 7 decides by exactly
+# these.
+ss_status() {
+  if ss_running; then
+    echo "speakersafetyd is running (pid $(cat $PIDFILE)) -- speakers protected."
+  elif ! ss_needed; then
+    echo "speakersafetyd is not running ($ss_why)."
+    return 3
+  else
+    echo "speakersafetyd is NOT running -- speakers are NOT protected."
+    return 1
+  fi
+}
+
+case "$1" in
+  start)   ss_start ;;
+  stop)    ss_stop ;;
+  restart) ss_stop; sleep 1; ss_start ;;
+  status)  ss_status ;;
+  *)       echo "usage: $0 {start|stop|restart|status}" ; exit 1 ;;
+esac

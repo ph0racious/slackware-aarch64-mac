@@ -1,0 +1,99 @@
+#!/bin/sh
+#
+# /etc/rc.d/rc.tiny-dfr
+#
+# Slackware SysV init script for tiny-dfr, the Touch Bar daemon for the 13-inch
+# M1 and M2 MacBook Pro. Without it the Touch Bar stays blank, and on those
+# machines that is where the function, media and brightness keys are.
+#
+# WHY THIS EXISTS: upstream ships tiny-dfr.service (systemd) and starts it from
+# udev rules via ENV{SYSTEMD_WANTS}. Both are inert on Slackware.
+#
+# Differences from the systemd unit, and why:
+#   BindsTo= the Touch Bar devices -> start does nothing unless a Touch Bar
+#                                     input device exists, so this script is
+#                                     safe to enable on every Mac.
+#   Restart=always                 -> no SysV equivalent. start confirms the
+#                                     daemon stayed up and says so if not;
+#                                     'restart' is manual.
+#   The sandboxing directives      -> not reproduced. The daemon drops to
+#                                     nobody (groups input, video) itself once
+#                                     it has opened the display and uinput.
+
+DAEMON=/usr/bin/tiny-dfr
+PIDFILE=/run/tiny-dfr.pid
+LOG=/var/log/tiny-dfr.log
+
+# The Touch Bar input devices upstream's udev rules match, by name.
+touchbar_present() {
+  grep -qE '^N: Name="(Apple Inc\. Touch Bar Display Touchpad|MacBookPro17,1 Touch Bar|Mac14,7 Touch Bar)"$' \
+    /proc/bus/input/devices 2>/dev/null
+}
+
+td_running() {
+  # The recorded pid must be the daemon, not merely alive: after a crash the
+  # pid file stays behind, and once its pid is reused kill -0 would take that
+  # process for the daemon, and stop would kill it. Checked the way stock's
+  # rc.dnsmasq checks its own pid file.
+  [ -s "$PIDFILE" ] || return 1
+  pgrep -l -F "$PIDFILE" 2>/dev/null | grep -q tiny-dfr
+}
+
+td_start() {
+  if td_running; then
+    echo "tiny-dfr is already running (pid $(cat $PIDFILE))."
+    return 0
+  fi
+  if ! touchbar_present; then
+    echo "tiny-dfr: no Touch Bar on this machine, not starting."
+    return 0
+  fi
+  if [ ! -x "$DAEMON" ]; then
+    echo "tiny-dfr: $DAEMON not found or not executable." 1>&2
+    return 1
+  fi
+  # The daemon writes key presses through /dev/uinput.
+  modprobe uinput 2>/dev/null
+  echo "Starting Touch Bar daemon:  $DAEMON"
+  "$DAEMON" >> "$LOG" 2>&1 &
+  echo $! > "$PIDFILE"
+  # It exits early if it cannot open the Touch Bar's display or input; a silent
+  # exit would leave a blank Touch Bar with nothing to say why.
+  sleep 1
+  if td_running; then
+    echo "tiny-dfr started (pid $(cat $PIDFILE))."
+  else
+    rm -f "$PIDFILE"
+    echo "tiny-dfr FAILED to stay running -- see $LOG." 1>&2
+    return 1
+  fi
+}
+
+td_stop() {
+  if td_running; then
+    echo "Stopping tiny-dfr."
+    kill "$(cat "$PIDFILE")" 2>/dev/null
+    sleep 1
+    td_running && kill -9 "$(cat "$PIDFILE")" 2>/dev/null
+  fi
+  rm -f "$PIDFILE"
+}
+
+td_status() {
+  if td_running; then
+    echo "tiny-dfr is running (pid $(cat $PIDFILE))."
+  elif touchbar_present; then
+    echo "tiny-dfr is NOT running -- the Touch Bar is blank."
+    return 1
+  else
+    echo "tiny-dfr is not running (no Touch Bar on this machine)."
+  fi
+}
+
+case "$1" in
+  start)   td_start ;;
+  stop)    td_stop ;;
+  restart) td_stop; sleep 1; td_start ;;
+  status)  td_status ;;
+  *)       echo "usage: $0 {start|stop|restart|status}" ; exit 1 ;;
+esac

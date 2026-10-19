@@ -1,0 +1,337 @@
+#!/bin/bash
+#
+# Copyright 2026  Jim Phoenix, Earth, Milky Way.  Modified BSD terms:
+# redistributions must retain this notice.  Full text in LICENSE at the
+# slackware-aarch64-mac tree root.
+#
+# grub-entry-mac -- add/verify the GRUB menuentry that boots this port's
+# kernel. Run this ON the target system, as root.
+#
+# WHY THIS EXISTS
+# ---------------
+# Installing the kernel package puts /boot/Image-armv8-mac on disk. It does NOT
+# make the machine boot it. Slackware's grub.cfg still points at Slackware's own
+# generic ARM kernel. That kernel has mainline's partial Apple Silicon support
+# but no Apple watchdog driver, so the watchdog U-Boot leaves running resets
+# the machine during boot. Something has to write the menuentry, and on
+# Slackware ARM nothing does:
+#
+#   * grub-mkconfig is patched by Slackware to refuse on ARM:
+#       "/usr/sbin/grub-mkconfig should not be used on ARM. Edit
+#        /boot/grub/grub.cfg manually if required."
+#     and it exits 1, so nothing on this platform generates an entry. This is
+#     why the entry is written here directly.
+#
+#   * Consequently /etc/grub.d/* is dead weight on this platform: those files
+#     are only ever read BY grub-mkconfig. Dropping the entry into 41_custom
+#     would look tidy and do precisely nothing -- the same silent failure this
+#     exists to avoid. So this edits grub.cfg itself.
+#
+# WHAT THE ENTRY DELIBERATELY OMITS
+# ---------------------------------
+#   no 'initrd'      -- everything on the path to / is built into the kernel
+#                       (NVME_APPLE, APPLE_RTKIT, EXT4_FS and EFI_PARTITION
+#                       among it). Referencing an initrd that is not shipped
+#                       makes GRUB print an error and wait up to 10 seconds
+#                       before it boots the kernel anyway.
+#   no 'devicetree'  -- U-Boot passes the correct DTB to the kernel via EFI,
+#                       taken from boot.bin. Supplying one here overrides that
+#                       with a guess and can break a machine that would
+#                       otherwise boot. This is the easiest thing to get wrong.
+#   no 'rw'          -- Slackware's rc.S fsck's the root fs and remounts it
+#                       read-write itself. Mounting rw up front skips that.
+#
+# 'rootwait' IS included: Apple NVMe probes asynchronously and root may not
+# exist yet at the moment the kernel first looks for it.
+#
+# Re-running is safe: the entry is delimited by markers and replaced in place,
+# never duplicated.
+
+set -euo pipefail
+
+GRUBCFG=/boot/grub/grub.cfg
+KERNEL=/boot/Image-armv8-mac
+# It must equal the menuentry title in installer-text/template-grub-mac.cfg:
+# --install replaces the installer's entry, and a different title here would
+# silently rename it.
+TITLE="Slackware Linux (AArch64-mac)"
+
+# The markers delimit the block this script owns. They must equal the ones in
+# installer-text/template-grub-mac.cfg, or --install adds a second entry instead
+# of replacing the installer's.
+BEGIN="###MAC-BEGIN -- managed by grub-entry-mac, do not edit between markers"
+END="###MAC-END"
+
+die()  { echo "grub-entry-mac: $*" >&2; exit 1; }
+info() { echo "  $*"; }
+
+usage() {
+  cat <<EOF
+usage: grub-entry-mac <mode> [--cmdline=STR]
+
+  --install       write (or replace) this port's entry in $GRUBCFG
+  --verify        check the entry is valid and its kernel is present; read-only
+  --show          print the entry --install would write; change nothing
+  --cmdline=STR   extra kernel parameters, appended verbatim
+EOF
+}
+
+# ---- discover how to identify the root filesystem -------------------------
+#
+# TWO DIFFERENT IDENTIFIERS ARE NEEDED HERE, AND CONFUSING THEM DOES NOT BOOT.
+#
+#   GRUB's 'search'  -- finds the partition holding /boot. GRUB has filesystem
+#                       drivers, so --fs-uuid (the *filesystem* UUID) is fine.
+#
+#   the kernel's root= -- resolved by the kernel itself, because NO initrd is
+#                       shipped. The kernel's early_lookup_bdev() understands
+#                       PARTUUID= (a GPT *partition* UUID), PARTLABEL=,
+#                       /dev/xxx and major:minor. It does NOT understand a
+#                       filesystem UUID= or LABEL=; those are resolved by
+#                       userspace in an initramfs, which is absent here.
+#
+# Using root=UUID= here fails in a way that looks nothing like a bad root=:
+#
+#   Kernel panic - not syncing: VFS: Unable to mount root fs on unknown-block(0,0)
+#
+# The disk is present and its driver bound; the kernel simply cannot turn the
+# string into a device number. Slackware's own entry gets away with
+# root=LABEL=SLKroot only because it ships an initrd that resolves it.
+#
+# So: PARTUUID for root=, filesystem UUID for GRUB's search.
+detect_root() {
+  ROOTDEV=$(findmnt -no SOURCE / 2>/dev/null) || die "cannot determine root device"
+  ROOTFSTYPE=$(findmnt -no FSTYPE / 2>/dev/null)
+  ROOTUUID=$(blkid -s UUID -o value "$ROOTDEV" 2>/dev/null || true)
+  ROOTPARTUUID=$(blkid -s PARTUUID -o value "$ROOTDEV" 2>/dev/null || true)
+
+  # --- what the kernel gets ---
+  if [ -n "$ROOTPARTUUID" ]; then
+    ROOTSPEC="PARTUUID=$ROOTPARTUUID"
+  else
+    # No PARTUUID means the disk is not GPT-partitioned. On a Mac it always is.
+    ROOTSPEC="$ROOTDEV"
+    echo "grub-entry-mac: WARNING: root has no PARTUUID (not a GPT disk?);" >&2
+    echo "  falling back to the device node $ROOTDEV, which is not guaranteed" >&2
+    echo "  stable across boots." >&2
+  fi
+
+  # --- what GRUB gets, to locate /boot ---
+  # Without a filesystem UUID there is nothing to search by. Leave the search
+  # out: GRUB's root is then the partition it loaded grub.cfg from, which is
+  # the root filesystem, because /boot lives there (see kernel_grub_path).
+  if [ -n "$ROOTUUID" ]; then
+    SEARCHLINE="search --no-floppy --set=root --fs-uuid $ROOTUUID"
+  else
+    SEARCHLINE=""
+  fi
+}
+
+build_entry() {
+  local kpath="$1" cmdline="$2"
+  {
+    echo "$BEGIN"
+    echo "menuentry \"$TITLE\" {"
+    echo "   echo \"Loading Slackware Linux...\""
+    echo "   insmod part_gpt"
+    echo "   insmod part_msdos"
+    echo "   insmod ext2"
+    echo "   insmod linux"
+    [ -n "$SEARCHLINE" ] && echo "   $SEARCHLINE"
+    echo "   linux $kpath root=$ROOTSPEC rootfstype=$ROOTFSTYPE rootwait$cmdline"
+    echo "   # No initrd: NVMe/RTKit/ext4 are built into this kernel."
+    echo "   # No devicetree: U-Boot supplies the DTB via EFI from boot.bin."
+    echo "}"
+    echo "$END"
+  }
+}
+
+# /boot LIVES ON THE ROOT FILESYSTEM, as stock Slackware ARM assumes: its own
+# GRUB template and this port's installer template both search for the root
+# filesystem and load /boot/... from it. A separate /boot partition would need
+# the search and the kernel path to name THAT filesystem instead; half of that
+# is an entry that cannot boot, so a separate /boot is refused rather than
+# guessed at.
+boot_is_separate() { findmnt -no TARGET /boot 2>/dev/null | grep -qx /boot; }
+#
+# Reference the SYMLINK (/boot/Image-armv8-mac), not the versioned file it points
+# at. GRUB's ext2 module follows symlinks, and Slackware's own entry relies on
+# exactly this (its 'Image-armv8' is a symlink too). Baking in the resolved
+# name would leave grub.cfg pointing at a versioned image that the next kernel
+# upgrade removes -- upgradepkg takes the old package's files with it, so the
+# entry survives the upgrade and the kernel does not. An unbootable machine,
+# discovered at reboot.
+kernel_grub_path() { echo "$KERNEL"; }
+
+# console=tty0 IS NOT COSMETIC.
+#
+# Apple device trees set `chosen/stdout-path = serial0`. With no console= the
+# kernel honours that and /dev/console becomes a UART with nothing attached:
+# boot messages vanish, and anything that PROMPTS on the console -- rc.S's fsck
+# question after an unclean shutdown is the one that matters -- waits forever
+# on a machine that looks hung. Login still works, because agetty runs on tty1
+# regardless, so nothing else gives it away.
+#
+# Same finding as the installer medium, same fix.
+CONSOLE=" console=tty0"
+
+MODE=""; EXTRA=""
+for a in "$@"; do
+  case "$a" in
+    --install|--verify|--show) MODE="$a" ;;
+    --cmdline=*)  EXTRA=" ${a#*=}" ;;
+    -h|--help)    usage; exit 0 ;;
+    *) die "unknown argument: $a (try --help)" ;;
+  esac
+done
+[ -n "$MODE" ] || { usage; exit 2; }
+
+# ---- verify ---------------------------------------------------------------
+if [ "$MODE" = "--verify" ]; then
+  rc=0
+  [ -f "$GRUBCFG" ] || die "no $GRUBCFG"
+  if ! grep -qF "$BEGIN" "$GRUBCFG"; then
+    echo "  FAIL  no menuentry for this port in $GRUBCFG"
+    echo "        nothing will boot this port's kernel. Run: $0 --install"
+    exit 1
+  fi
+  info "ok    menuentry present"
+  kline=$(sed -n "/$BEGIN/,/$END/p" "$GRUBCFG" | grep -E '^\s*linux ' || true)
+  [ -n "$kline" ] || { echo "  FAIL  entry has no 'linux' line"; exit 1; }
+  kfile=$(echo "$kline" | awk '{print $2}')
+  if [ -e "$kfile" ]; then
+    info "ok    kernel present: $kfile"
+  else
+    echo "  FAIL  kernel $kfile not found on disk"; rc=1
+  fi
+  if boot_is_separate; then
+    echo "  WARN  /boot is a separate filesystem. This entry, like stock Slackware"
+    echo "        ARM's, finds the kernel on the root filesystem's /boot; with a"
+    echo "        separate /boot it will not boot unless edited by hand."
+  fi
+  if sed -n "/$BEGIN/,/$END/p" "$GRUBCFG" | grep -qE '^\s*initrd '; then
+    echo "  FAIL  entry has an initrd line; this kernel ships no initrd"; rc=1
+  else
+    info "ok    no initrd line (correct)"
+  fi
+  if sed -n "/$BEGIN/,/$END/p" "$GRUBCFG" | grep -qE '^\s*devicetree '; then
+    echo "  FAIL  entry has a devicetree line; U-Boot supplies the DTB"; rc=1
+  else
+    info "ok    no devicetree line (correct)"
+  fi
+  # With no initrd the kernel must resolve root= by itself, and it cannot
+  # resolve a filesystem UUID=/LABEL=. This boots as far as a rootfs panic and
+  # looks like a disk problem rather than a bad root=, so gate it explicitly.
+  rootarg=$(echo "$kline" | grep -oE 'root=[^ ]+' || true)
+  case "$rootarg" in
+    root=UUID=*|root=LABEL=*)
+      echo "  FAIL  $rootarg cannot be resolved without an initrd -- use PARTUUID="
+      rc=1 ;;
+    root=PARTUUID=*|root=PARTLABEL=*|root=/dev/*)
+      info "ok    $rootarg (kernel-resolvable without an initrd)" ;;
+    "") echo "  FAIL  entry has no root= parameter"; rc=1 ;;
+    *)  info "note  $rootarg -- unrecognised form, check it resolves without an initrd" ;;
+  esac
+  # No console= on an Apple machine means /dev/console is the dead UART that
+  # stdout-path names. The machine still boots and still lets you log in, so
+  # this is a warning rather than a failure -- but it is why a boot can look
+  # silent and why an fsck prompt after an unclean shutdown never appears.
+  case "$kline" in
+    *console=*) info "ok    $(echo "$kline" | grep -oE 'console=[^ ]+' | paste -sd' ')" ;;
+    *) echo "  WARN  no console= on the cmdline. Apple DTs point stdout-path at"
+       echo "        a serial port with nothing on it, so boot messages and any"
+       echo "        console prompt go nowhere. Re-run --install to add tty0." ;;
+  esac
+  exit $rc
+fi
+
+# ---- --show and --install, as root (only --install writes) -----------------
+[ "$(id -u)" = 0 ] || die "must be root"
+[ -f "$GRUBCFG" ] || die "no $GRUBCFG -- is GRUB installed?"
+
+[ -e "$KERNEL" ] || die "$KERNEL not found -- install the kernel package first"
+boot_is_separate && die "/boot is a separate filesystem. This entry, like stock Slackware
+  ARM's, finds the kernel on the root filesystem's /boot, so it cannot be
+  written correctly here; edit $GRUBCFG by hand."
+detect_root
+KPATH=$(kernel_grub_path)
+ENTRY=$(build_entry "$KPATH" "$CONSOLE$EXTRA")
+
+# --show prints the entry and nothing else, so its output can be compared with
+# grub.cfg or saved as it is. Warnings go to stderr.
+if [ "$MODE" = "--show" ]; then
+  echo "$ENTRY"
+  exit 0
+fi
+
+# --install
+# -e follows symlinks, so a dangling Image-armv8-mac would already have failed
+# above; say so explicitly since that is the one way the symlink bites back.
+[ -L "$KERNEL" ] && info "kernel link : $KERNEL -> $(readlink "$KERNEL")"
+info "root device : $ROOTDEV  ($ROOTSPEC, $ROOTFSTYPE)"
+info "kernel      : $(readlink -f "$KERNEL")  -> grub path $KPATH"
+
+BACKUP="$GRUBCFG.bak.$(date +%Y%m%d%H%M%S)"
+cp -a "$GRUBCFG" "$BACKUP"
+info "backup      : $BACKUP"
+
+TMP=$(mktemp)
+if grep -qxF "$BEGIN" "$GRUBCFG"; then
+  # The replacement below drops everything from BEGIN up to END. With no END
+  # after BEGIN it would drop the rest of grub.cfg, and grub-script-check would
+  # still pass the truncated file.
+  BEGIN="$BEGIN" END="$END" awk '
+    $0 == ENVIRON["BEGIN"] { b = 1 }
+    b && $0 == ENVIRON["END"] { e = 1 }
+    END { exit !e }' "$GRUBCFG" || { rm -f "$TMP"; die "$GRUBCFG has the begin marker but no end marker after it.
+  Refusing to edit it; restore the ###MAC-END line by hand."; }
+  # REPLACE IN PLACE. The installer puts the entry first, and the entries after
+  # it sit inside Slackware's own ##SLK... section markers. Deleting ours and
+  # re-inserting it before the first remaining menuentry would land it INSIDE
+  # one of those sections, where whatever manages the section manages our entry.
+  BEGIN="$BEGIN" END="$END" ENTRY="$ENTRY" awk '
+    $0 == ENVIRON["BEGIN"] { print ENVIRON["ENTRY"]; skip = 1; next }
+    skip && $0 == ENVIRON["END"] { skip = 0; next }
+    !skip' "$GRUBCFG" > "$TMP"
+  WHERE="replaced in place"
+else
+  # No entry yet: insert it before the first menuentry, so it is index 0, which
+  # 'set default=0' selects -- and above any ##SLK... marker that opens that
+  # entry's section, never between the marker and its entry.
+  first=$(grep -nE '^\s*menuentry ' "$GRUBCFG" | head -1 | cut -d: -f1 || true)
+  while [ -n "$first" ] && [ "$first" -gt 1 ] \
+        && sed -n "$((first - 1))p" "$GRUBCFG" | grep -q '^##SLK'; do
+    first=$((first - 1))
+  done
+  if [ -n "$first" ]; then
+    head -n $((first - 1)) "$GRUBCFG" > "$TMP"
+    printf '%s\n' "$ENTRY" >> "$TMP"
+    tail -n +"$first" "$GRUBCFG" >> "$TMP"
+  else
+    { cat "$GRUBCFG"; printf '%s\n' "$ENTRY"; } > "$TMP"
+  fi
+  WHERE="inserted first, so it is the default"
+fi
+
+# Validate BEFORE installing it. A malformed grub.cfg is discovered at boot,
+# which on a Mac means an unbootable machine and a long way back.
+if command -v grub-script-check >/dev/null 2>&1; then
+  if grub-script-check "$TMP"; then
+    info "syntax      : grub-script-check OK"
+  else
+    rm -f "$TMP"
+    die "generated grub.cfg FAILS grub-script-check -- refusing to install it.
+  Your existing $GRUBCFG is untouched."
+  fi
+else
+  info "syntax      : grub-script-check unavailable, skipped"
+fi
+
+cat "$TMP" > "$GRUBCFG"
+rm -f "$TMP"
+
+# `|| true`: grep -c exits 1 on a zero count, and under set -e that would kill
+# the script at this assignment -- before the die below could say why.
+n=$(grep -cxF "$BEGIN" "$GRUBCFG" || true)
+[ "$n" = 1 ] || die "expected exactly 1 entry, found $n -- check $GRUBCFG"
+info "installed   : $WHERE"

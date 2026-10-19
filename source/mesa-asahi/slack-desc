@@ -1,0 +1,19 @@
+# HOW TO EDIT THIS FILE:
+# The "handy ruler" below makes it easier to edit a package description.
+# Line up the first '|' above the ':' following the base package name, and
+# the '|' on the right side marks the last column you can put a character in.
+# You must make exactly 11 lines for the formatting to be correct. It's also
+# customary to leave one space after the ':' except on otherwise blank lines.
+
+    |-----handy-ruler------------------------------------------------------|
+mesa: mesa (OpenGL/Vulkan, rebuilt with the Asahi AGX drivers)
+mesa:
+mesa: Slackware's own Mesa with asahi added to -Dgallium-drivers and
+mesa: -Dvulkan-drivers; mesa-amber's classic r200, radeon and nouveau_vieux
+mesa: drivers are left out, as no Apple Silicon Mac can host them.
+mesa:
+mesa: Stock Slackware omits asahi from both lists, so there is no
+mesa: asahi_dri.so and every GL client on Apple Silicon falls back to
+mesa: llvmpipe and renders on the CPU, however well the kernel driver works.
+mesa:
+mesa: Homepage: https://mesa3d.org

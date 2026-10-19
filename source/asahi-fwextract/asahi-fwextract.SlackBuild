@@ -1,0 +1,132 @@
+#!/bin/bash
+
+# Slackware build script for asahi-fwextract (Apple Silicon firmware extractor)
+
+# Copyright 2026  Jim Phoenix, Earth, Milky Way
+# All rights reserved.
+#
+# Redistribution and use of this script, with or without modification, is
+# permitted provided that the following conditions are met:
+#
+# 1. Redistributions of this script must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+#
+#  THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR IMPLIED
+#  WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+#  MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO
+#  EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+#  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+#  PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+#  OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+#  WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+#  OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+#  ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+# asahi-fwextract unpacks Apple's Wi-Fi, Bluetooth and other vendor firmware
+# into the form Linux loads.  Here vendorfw-install-mac uses it for a capture
+# taken from a live macOS by macos-fw-harvest.sh (the Asahi installer's own
+# copy on the ESP needs no extraction), and asahi-fwupdate uses it to rebuild
+# that copy.  The firmware is machine-specific and not redistributable, so
+# this tool runs on the target Mac, not on the build host.
+#
+# The upstream source (the asahi-alarm-installer repo) ships a setup.py that
+# imports distutils.core.  Python 3.12 dropped distutils from the stdlib, so
+# upstream's import works here only through the copy setuptools bundles.
+# patches/0001 calls setuptools.setup, the supported entry point, so the build
+# does not depend on that copy; it generates the asahi-fwextract console script
+# that asahi-fwupdate runs by name.  See docs/PORTING.md.
+#
+# Runtime deps (must be installed on the target, not enforced here): python3,
+# and lzfse, whose library asahi_firmware/img4.py loads.
+#
+# 'noarch': pure-Python, no compiled extensions.
+
+cd $(dirname $0) ; CWD=$(pwd)
+
+PRGNAM=asahi-fwextract
+VERSION=${VERSION:-0.7.9}
+BUILD=${BUILD:-1}
+TAG=${TAG:-_mac}
+ARCH=noarch
+
+# The upstream tarball is the asahi-alarm-installer repo.
+SRCNAM=asahi-alarm-installer-$VERSION
+
+if [ ! -z "${PRINT_PACKAGE_NAME}" ]; then
+  echo "$PRGNAM-$VERSION-$ARCH-$BUILD$TAG.txz"
+  exit 0
+fi
+
+TMP=${TMP:-/tmp/mac}
+PKG=$TMP/package-$PRGNAM
+OUTPUT=${OUTPUT:-/tmp}
+
+set -e
+
+rm -rf $PKG
+mkdir -p $TMP $PKG $OUTPUT
+cd $TMP
+rm -rf $SRCNAM
+tar xf $CWD/sources/$PRGNAM-$VERSION.tar.gz
+cd $SRCNAM
+
+chown -R root:root .
+find . \
+ \( -perm 777 -o -perm 775 -o -perm 711 -o -perm 555 -o -perm 511 \) \
+ -exec chmod 755 {} \+ -o \
+ \( -perm 666 -o -perm 664 -o -perm 600 -o -perm 444 -o -perm 440 -o -perm 400 \) \
+ -exec chmod 644 {} \+
+
+# distutils -> setuptools (see the patch header for why).
+patch -p1 --fuzz=0 -i $CWD/patches/0001-use-setuptools-not-removed-distutils.patch
+
+# wifi.py builds firmware identities from a path it computes with str.lstrip,
+# which strips a character SET rather than a prefix and eats into the first
+# directory name. Whether it bites depends on the characters in the caller's
+# path, so it presents as an intermittent extraction failure. See the patch.
+patch -p1 --fuzz=0 -i $CWD/patches/0002-wifi-relative-path-not-lstrip.patch
+
+# Build a wheel with the setuptools backend and install it into $PKG.
+# --no-isolation uses the system build deps (python-build, python-installer,
+# python-wheel, python-setuptools) rather than fetching from the network.
+python3 -m build --wheel --no-isolation
+python3 -m installer --destdir="$PKG" dist/*.whl
+
+# python-installer lays scripts down under whatever prefix the wheel encodes;
+# make sure the console script really landed somewhere on PATH. asahi-fwupdate
+# runs it by name, so a package without it is broken, not merely untidy.
+if [ ! -e "$PKG/usr/bin/asahi-fwextract" ]; then
+  echo "$PRGNAM: the asahi-fwextract entry point was not generated under /usr/bin" >&2
+  find "$PKG" -name 'asahi-fwextract*' -printf '  installed: %p\n' >&2 || true
+  exit 1
+fi
+
+# ASSERT THE PATCH REACHED THE PACKAGE, not just the build tree. A wheel is
+# built from a copy; a patch that applied and then did not get packaged would
+# leave the intermittent extraction failure in place, and the only symptom is a
+# machine that quietly installs the Asahi installer's older Wi-Fi firmware.
+_wifi=$(find "$PKG" -path '*/asahi_firmware/wifi.py' | head -1)
+[ -n "$_wifi" ] || { echo "$PRGNAM: asahi_firmware/wifi.py is not in the package" >&2; exit 1; }
+grep -q 'os.path.relpath(dirpath, source_path)' "$_wifi" \
+  || { echo "$PRGNAM: patches/0002 did not reach the packaged wifi.py" >&2; exit 1; }
+grep -q 'dirpath.lstrip(source_path)' "$_wifi" \
+  && { echo "$PRGNAM: packaged wifi.py still uses lstrip on a path" >&2; exit 1; }
+echo "$PRGNAM: wifi.py uses relpath (patches/0002 verified in the package)"
+
+mkdir -p $PKG/usr/doc/$PRGNAM-$VERSION
+cp -a LICENSE README* $PKG/usr/doc/$PRGNAM-$VERSION 2>/dev/null || true
+cat $CWD/$PRGNAM.SlackBuild > $PKG/usr/doc/$PRGNAM-$VERSION/$PRGNAM.SlackBuild
+cp -a $CWD/patches/*.patch $PKG/usr/doc/$PRGNAM-$VERSION/ 2>/dev/null || true
+# Slackware ARM's slack644docs: every doc file 0644. cp -a keeps a source's own
+# mode, and a patch checked out of this tree can arrive group-writable.
+find $PKG/usr/doc -type f -exec chmod 644 {} \+
+
+# Note: no doinst.sh.  Arch's .install runs asahi-fwupdate at install time to
+# extract vendor firmware; here the installer's setup.vendorfw-mac step
+# (shipped by kernel_armv8-mac) installs the firmware, extracting only a live
+# macOS capture, and nothing runs at package time.
+mkdir -p $PKG/install
+cat $CWD/slack-desc > $PKG/install/slack-desc
+
+cd $PKG
+/sbin/makepkg -l y -c n $OUTPUT/$PRGNAM-$VERSION-$ARCH-$BUILD$TAG.txz

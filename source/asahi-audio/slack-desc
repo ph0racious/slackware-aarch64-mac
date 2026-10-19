@@ -1,0 +1,19 @@
+# HOW TO EDIT THIS FILE:
+# The "handy ruler" below makes it easier to edit a package description.
+# Line up the first '|' above the ':' following the base package name, and
+# the '|' on the right side marks the last column you can put a character in.
+# You must make exactly 11 lines for the formatting to be correct. It's also
+# customary to leave one space after the ':' except on otherwise blank lines.
+
+           |-----handy-ruler------------------------------------------------------|
+asahi-audio: asahi-audio (PipeWire DSP configuration for Apple Silicon)
+asahi-audio:
+asahi-audio: PipeWire and WirePlumber config plus FIR filter data implementing
+asahi-audio: the DSP chain that drives Apple Silicon speakers correctly.
+asahi-audio: Covers the M1 and M2 Macs Asahi supports, the Mac mini M2 included.
+asahi-audio:
+asahi-audio: Requires PipeWire built with LV2 support, plus lsp-plugins-lv2,
+asahi-audio: bankstown and triforce-lv2 at runtime.
+asahi-audio: REQUIRED for correct speaker output; needs the LV2 stack below.
+asahi-audio: This is sound quality, not speaker protection -- see speakersafetyd.
+asahi-audio: Homepage: https://github.com/AsahiLinux/asahi-audio

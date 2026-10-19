@@ -1,0 +1,19 @@
+
+Hardware Model: \Zb\Zr\Z1 %HWM% \Z1\Zn
+
+This is Apple Silicon, which this Slackware media is built
+for. This particular model has not been tested, but the boot
+loader is expected to configure correctly for it.
+
+GRUB will be installed and configured automatically at:
+\Zb\Z7%GRUBCONF% \Zn
+
+The entry is written for this machine: no initrd, no
+devicetree, and the root filesystem identified by PARTUUID.
+You can review it from a shell at the end of the install.
+
+If you SKIP this step no boot loader is installed at all, and
+the machine will not boot on its own. Only SKIP if you intend
+to configure one yourself.
+
+\ZbIt is recommended to install the boot loader.\Zn

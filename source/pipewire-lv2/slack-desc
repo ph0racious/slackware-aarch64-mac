@@ -1,0 +1,19 @@
+# HOW TO EDIT THIS FILE:
+# The "handy ruler" below makes it easier to edit a package description.
+# Line up the first '|' above the ':' following the base package name, and
+# the '|' on the right side marks the last column you can put a character in.
+# You must make exactly 11 lines for the formatting to be correct. It's also
+# customary to leave one space after the ':' except on otherwise blank lines.
+
+        |-----handy-ruler------------------------------------------------------|
+pipewire: pipewire (multimedia server, rebuilt with LV2 support)
+pipewire:
+pipewire: PipeWire handles audio and video streams. This is Slackware's own
+pipewire: package rebuilt with -Dlv2=enabled, so its filter-chain module can
+pipewire: load LV2 plugins. Its pipewire-enable.sh, pipewire-disable.sh and
+pipewire: autostart samples are left out: asahi-audio turns PipeWire on.
+pipewire:
+pipewire: Stock Slackware builds this with lv2=auto, which silently resolves
+pipewire: to disabled because lilv is not packaged. asahi-audio needs LV2.
+pipewire:
+pipewire: Homepage: https://pipewire.org

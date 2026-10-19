@@ -1,0 +1,19 @@
+# HOW TO EDIT THIS FILE:
+# The "handy ruler" below makes it easier to edit a package description.
+# Line up the first '|' above the ':' following the base package name, and
+# the '|' on the right side marks the last column you can put a character in.
+# You must make exactly 11 lines for the formatting to be correct. It's also
+# customary to leave one space after the ':' except on otherwise blank lines.
+
+                |-----handy-ruler------------------------------------------------------|
+kernel_armv8-mac: kernel_armv8-mac (Slackware's kernel for Apple Silicon Macs)
+kernel_armv8-mac:
+kernel_armv8-mac: Slackware's own kernel source (6.18.33) with Asahi's Apple
+kernel_armv8-mac: Silicon support rebased onto it, built with 16K pages. Carries
+kernel_armv8-mac: drivers for the display controller, the GPU, audio with speaker
+kernel_armv8-mac: protection, and the laptop keyboard and trackpad.
+kernel_armv8-mac:
+kernel_armv8-mac: REQUIRED: the stock kernel is 4K-page and cannot boot a Mac.
+kernel_armv8-mac:
+kernel_armv8-mac:
+kernel_armv8-mac:

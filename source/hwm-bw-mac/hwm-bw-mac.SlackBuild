@@ -1,0 +1,251 @@
+#!/bin/bash
+
+# Slackware build script for hwm-bw-mac
+# (Boot Loader firmware and tools for Apple Silicon Macs)
+
+# Copyright 2026  Jim Phoenix, Earth, Milky Way
+# All rights reserved.
+#
+# Redistribution and use of this script, with or without modification, is
+# permitted provided that the following conditions are met:
+#
+# 1. Redistributions of this script must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+#
+#  THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR IMPLIED
+#  WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+#  MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO
+#  EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+#  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+#  PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+#  OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+#  WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+#  OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+#  ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+# WHY THIS PACKAGE EXISTS, AND WHY IT IS NAMED THIS
+# -------------------------------------------------
+# Slackware ARM already has a convention for per-platform boot firmware, and it
+# is not "one package per upstream project" -- it is one package per platform:
+#
+#   a/hwm-bw-raspberrypi   "Boot Loader firmware and tools for the Raspberry Pi"
+#   a/hwm-bw-lx2160acex7   HoneyComb LX2
+#   a/hwm-bw-rk3399        Rockchip RK3399
+#
+# This package is the Apple Silicon member of that family: m1n1 and U-Boot.
+#
+# ITS INSTALLED PATHS ARE LOAD-BEARING, and are Asahi's own: update-m1n1
+# (asahi-scripts) finds m1n1.bin and u-boot-nodtb.bin under /usr/lib/asahi-boot
+# by default. If you move a file here, update-m1n1 no longer finds it and stops
+# with an error, leaving boot.bin as it was.
+#
+# The device trees under dtb/ are shipped as upstream's uboot-asahi ships them,
+# but update-m1n1 does NOT use them: /etc/default/update-m1n1 takes the
+# kernel's, as upstream's Arch package does. These are U-Boot's mainline trees
+# and lack the nodes Asahi's display, audio and M2 laptop input drivers need.
+#
+# NOTHING INSTALLS THIS DURING SETUP. A fresh install boots the m1n1 and U-Boot
+# the Asahi installer put on the ESP; these replace them only when update-m1n1
+# is run.
+#
+# PROVENANCE
+# ----------
+# The version is a date, since one package carries two upstreams and neither's
+# version can stand for both. The component versions therefore do not appear in
+# the package name, so they are recorded here, in slack-desc, and in
+# docs/PORTING.md's pin table; all three must be updated together:
+#
+#   m1n1     1.5.2                    AsahiLinux/m1n1 v1.5.2 (+ artwork 80d14f8b)
+#   U-Boot   2026.04.asahi2           AsahiLinux/u-boot asahi-v2026.04-2
+#
+# Run tools/fetch-sources.sh hwm-bw-mac to populate sources/.
+
+cd $(dirname $0) ; CWD=$(pwd)
+
+PRGNAM=hwm-bw-mac
+# Date-based (see PROVENANCE above). Bump when either component is updated;
+# the components' own versions live in the variables below.
+VERSION=${VERSION:-2026.08.06}
+BUILD=${BUILD:-1}
+TAG=${TAG:-_mac}
+
+# --- component pins ---
+M1N1_VER=${M1N1_VER:-1.5.2}
+ARTWORK_COMMIT=${ARTWORK_COMMIT:-80d14f8b6f485b310e305a84b4b806361518ddd1}
+UBOOT_VER=${UBOOT_VER:-2026.04}
+ASAHI_REL=${ASAHI_REL:-2}
+UBOOT_FULL=${UBOOT_VER}.asahi${ASAHI_REL}
+UBOOT_SRC=u-boot-asahi-v${UBOOT_VER}-${ASAHI_REL}
+DEFCONFIG=apple_m1_defconfig
+
+if [ -z "$ARCH" ]; then
+  ARCH=$( uname -m )
+fi
+
+if [ ! -z "${PRINT_PACKAGE_NAME}" ]; then
+  echo "$PRGNAM-$VERSION-$ARCH-$BUILD$TAG.txz"
+  exit 0
+fi
+
+NUMJOBS=${NUMJOBS:-"-j$(nproc)"}
+
+# U-Boot's banner records its build time in the build host's timezone.
+export TZ=UTC
+
+TMP=${TMP:-/tmp/mac}
+PKG=$TMP/package-$PRGNAM
+OUTPUT=${OUTPUT:-/tmp}
+
+if [ "$( uname -m )" != "aarch64" ]; then
+  echo "$PRGNAM: builds natively on aarch64, not $( uname -m )." >&2
+  exit 1
+fi
+
+set -e
+
+rm -rf $PKG
+mkdir -p $TMP $PKG $OUTPUT
+mkdir -p $PKG/usr/lib/asahi-boot/dtb
+
+######################################################################
+# Component 1: m1n1  (boot stage 2)
+######################################################################
+cd $TMP
+rm -rf m1n1-$M1N1_VER artwork-$ARTWORK_COMMIT
+tar xf $CWD/sources/m1n1-$M1N1_VER.tar.gz
+tar xf $CWD/sources/artwork-$ARTWORK_COMMIT.tar.gz
+cd m1n1-$M1N1_VER
+
+# Populate the artwork submodule BEFORE the permission fixup. The GitHub release
+# tarball ships submodules as empty directories, so data/bootlogo_*.png (symlinks
+# into artwork/) dangle until this copy happens -- and chmod refuses to operate
+# on a dangling symlink, failing the build.
+rm -rf artwork
+cp -r $TMP/artwork-$ARTWORK_COMMIT artwork
+
+chown -R root:root .
+# -type f/-type d: never try to chmod a symlink (m1n1 has several, and any that
+# point outside the tree would abort the build).
+find . \( -type f -o -type d \) \
+ \( \( -perm 777 -o -perm 775 -o -perm 711 -o -perm 555 -o -perm 511 \) \
+ -exec chmod 755 {} \+ -o \
+ \( -perm 666 -o -perm 664 -o -perm 600 -o -perm 444 -o -perm 440 -o -perm 400 \) \
+ -exec chmod 644 {} \+ \)
+
+# Deliberately no SLKCFLAGS. m1n1 is freestanding firmware with its own
+# -ffreestanding / -mgeneral-regs-only flag set; injecting distro CFLAGS breaks
+# the build. ARCH is m1n1's toolchain prefix, not an architecture: empty
+# selects the native toolchain.
+make ARCH= RELEASE=1 $NUMJOBS
+
+[ -s build/m1n1.bin ] || { echo "$PRGNAM: m1n1.bin missing or empty" >&2; exit 1; }
+install -m644 build/m1n1.bin $PKG/usr/lib/asahi-boot/m1n1.bin
+
+mkdir -p $PKG/usr/doc/$PRGNAM-$VERSION/m1n1-$M1N1_VER
+cp -a LICENSE README.md $PKG/usr/doc/$PRGNAM-$VERSION/m1n1-$M1N1_VER 2>/dev/null || true
+# m1n1.bin embeds third-party code (libfdt, arm-trusted-firmware, the dwc3
+# driver, minlzma, tinf, dlmalloc, PDCLib, musl's float code, the Source Code
+# Pro font), and their notices travel with the binary: BSD-3's binary clause
+# and the OFL require it. README.md only points at them. Upstream's own
+# package installs this directory too, since AsahiLinux/PKGBUILDs 07c5fd03.
+cp -a 3rdparty_licenses $PKG/usr/doc/$PRGNAM-$VERSION/m1n1-$M1N1_VER/
+ls $PKG/usr/doc/$PRGNAM-$VERSION/m1n1-$M1N1_VER/3rdparty_licenses/LICENSE.* >/dev/null 2>&1 \
+  || { echo "$PRGNAM: m1n1's third-party licences are not in the package" >&2; exit 1; }
+
+######################################################################
+# Component 2: U-Boot  (UEFI environment, loaded by m1n1 stage 2)
+######################################################################
+cd $TMP
+rm -rf $UBOOT_SRC
+tar xf $CWD/sources/$UBOOT_SRC.tar.gz
+cd $UBOOT_SRC
+
+chown -R root:root .
+find . \
+ \( -perm 777 -o -perm 775 -o -perm 711 -o -perm 555 -o -perm 511 \) \
+ -exec chmod 755 {} \+ -o \
+ \( -perm 666 -o -perm 664 -o -perm 600 -o -perm 444 -o -perm 440 -o -perm 400 \) \
+ -exec chmod 644 {} \+
+
+# Apply the patch series in order. See patches/series for why the non-Apple
+# patches are present. --fuzz=0 matches upstream: if a patch stops applying
+# exactly, the series needs resyncing rather than silently fuzzing into place.
+applied=0
+while read -r patch; do
+  case "$patch" in ""|\#*) continue ;; esac
+  echo "$PRGNAM: applying $patch"
+  patch -p1 -s --fuzz=0 --no-backup-if-mismatch -i "$CWD/patches/$patch" \
+    || { echo "$PRGNAM: FAILED to apply $patch" >&2 ; exit 1 ; }
+  applied=$((applied + 1))
+done < "$CWD/patches/series"
+expected=$(grep -cvE '^\s*#|^\s*$' "$CWD/patches/series")
+[ "$applied" -eq "$expected" ] || { echo "$PRGNAM: applied $applied of $expected patches" >&2; exit 1; }
+
+# apple_m1_defconfig plus the upstream device trees for Apple platforms.
+# OF_UPSTREAM_VENDOR=apple makes the build emit dts/upstream/src/arm64/apple.
+make $DEFCONFIG
+scripts/config --file .config \
+  -e OF_UPSTREAM_BUILD_VENDOR \
+  --set-str OF_UPSTREAM_VENDOR apple
+make olddefconfig
+make $NUMJOBS
+
+# Sanity check before packaging: m1n1 stage 2 is a blind concatenation, so an
+# empty u-boot-nodtb.bin would produce a boot.bin that fails silently on real
+# hardware with no diagnostic.
+[ -s u-boot-nodtb.bin ] || { echo "$PRGNAM: u-boot-nodtb.bin missing or empty" >&2 ; exit 1 ; }
+install -m644 u-boot-nodtb.bin $PKG/usr/lib/asahi-boot/u-boot-nodtb.bin
+
+# Ship only Apple Silicon Mac device trees, as upstream's package() does. The
+# upstream tree also carries DTs for iPhones, iPads and T2 Intel Macs, which
+# nothing here uses (update-m1n1 takes the kernel's trees; see above).
+# Excluded families:
+#   t7000  A8    iPhone 6 / 6 Plus
+#   t7001  A8X   iPad Air 2
+#   t8010  A10   iPhone 7 / 7 Plus, iPad 6 / 7, iPod touch 7
+#   t8011  A10X  Apple TV 4K (1st gen), iPad Pro 10.5 / 12.9 (2nd gen)
+#   t8012  T2    Intel Macs
+#   t8015  A11   iPhone 8 / 8 Plus / X
+DTBDIR=dts/upstream/src/arm64/apple
+find $DTBDIR -maxdepth 1 -type f -name 't*.dtb' \
+  ! -name 't7000-*.dtb' \
+  ! -name 't7001-*.dtb' \
+  ! -name 't8010-*.dtb' \
+  ! -name 't8011-*.dtb' \
+  ! -name 't8012-*.dtb' \
+  ! -name 't8015-*.dtb' \
+  -exec install -m644 -t $PKG/usr/lib/asahi-boot/dtb {} +
+
+ls $PKG/usr/lib/asahi-boot/dtb/*.dtb >/dev/null 2>&1 \
+  || { echo "$PRGNAM: no Apple device trees were installed" >&2 ; exit 1 ; }
+
+mkdir -p $PKG/usr/doc/$PRGNAM-$VERSION/u-boot-$UBOOT_FULL
+cp -a Licenses README $PKG/usr/doc/$PRGNAM-$VERSION/u-boot-$UBOOT_FULL 2>/dev/null || true
+cp -a $CWD/patches/series $PKG/usr/doc/$PRGNAM-$VERSION/u-boot-$UBOOT_FULL/patch-series
+
+######################################################################
+# Package
+######################################################################
+# The two files below are this package's part of boot.bin. The device trees
+# counted after them are not in it: update-m1n1 takes the kernel's (see above).
+# Assert both rather than trusting the steps above: update-m1n1 stops with an
+# error on a missing one, but concatenates an empty one without complaint.
+for f in m1n1.bin u-boot-nodtb.bin; do
+  [ -s "$PKG/usr/lib/asahi-boot/$f" ] || { echo "$PRGNAM: $f missing or empty" >&2; exit 1; }
+done
+ndtb=$(ls $PKG/usr/lib/asahi-boot/dtb/*.dtb | wc -l)
+echo "$PRGNAM: m1n1 $M1N1_VER + U-Boot $UBOOT_FULL + $ndtb Apple device trees"
+
+mkdir -p $PKG/usr/doc/$PRGNAM-$VERSION
+cat $CWD/$PRGNAM.SlackBuild > $PKG/usr/doc/$PRGNAM-$VERSION/$PRGNAM.SlackBuild
+
+# Slackware ARM's slack644docs: every doc file 0644. cp -a keeps a source's own
+# mode: the patch-series copy arrives group-writable and U-Boot ships its
+# Licenses/ executable.
+find $PKG/usr/doc -type f -exec chmod 644 {} \+
+
+mkdir -p $PKG/install
+cat $CWD/slack-desc > $PKG/install/slack-desc
+
+cd $PKG
+/sbin/makepkg -l y -c n $OUTPUT/$PRGNAM-$VERSION-$ARCH-$BUILD$TAG.txz

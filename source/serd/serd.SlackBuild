@@ -1,0 +1,117 @@
+#!/bin/bash
+
+# Slackware build script for serd (lightweight RDF syntax library)
+
+# Copyright 2026  Jim Phoenix, Earth, Milky Way
+# All rights reserved.
+#
+# Redistribution and use of this script, with or without modification, is
+# permitted provided that the following conditions are met:
+#
+# 1. Redistributions of this script must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+#
+#  THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR IMPLIED
+#  WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+#  MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO
+#  EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+#  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+#  PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+#  OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+#  WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+#  OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+#  ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+# Part of the LV2 stack. Slackware ships none of the LV2 ecosystem, and its
+# PipeWire is built without LV2 support as a result: stock pipewire ships no
+# spa-0.2/filter-graph/libspa-filter-graph-plugin-lv2.so. This package is one
+# layer of what asahi-audio needs before it can do its DSP. Build order, as in
+# docs/BUILD.md:
+#
+#   zix serd sord lv2 sratom lilv, then pipewire (-Dlv2=enabled)
+#   lv2 (the spec/SDK) is needed to build sratom and lilv
+#
+# Ordinary C, meson build, nothing Apple-specific.
+#
+# NOTE the library path: Slackware AArch64 uses /usr/lib64. LV2 plugin bundles
+# must land in /usr/lib64/lv2 or hosts will not find them -- and nothing errors
+# when they are missing, they are simply silently absent.
+#
+# Run tools/fetch-sources.sh serd to populate sources/.
+
+cd $(dirname $0) ; CWD=$(pwd)
+
+PRGNAM=serd
+VERSION=${VERSION:-0.32.4}
+BUILD=${BUILD:-1}
+TAG=${TAG:-_mac}
+
+if [ -z "$ARCH" ]; then
+  ARCH=$( uname -m )
+fi
+
+if [ ! -z "${PRINT_PACKAGE_NAME}" ]; then
+  echo "$PRGNAM-$VERSION-$ARCH-$BUILD$TAG.txz"
+  exit 0
+fi
+
+NUMJOBS=${NUMJOBS:-"-j$(nproc)"}
+
+TMP=${TMP:-/tmp/mac}
+PKG=$TMP/package-$PRGNAM
+OUTPUT=${OUTPUT:-/tmp}
+
+if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "x86_64" ]; then
+  LIBDIRSUFFIX="64"
+else
+  LIBDIRSUFFIX=""
+fi
+SLKCFLAGS="-O2 -fPIC"
+
+set -e
+
+rm -rf $PKG
+mkdir -p $TMP $PKG $OUTPUT
+cd $TMP
+rm -rf $PRGNAM-$VERSION
+tar xf $CWD/sources/$PRGNAM-$VERSION.tar.xz
+cd $PRGNAM-$VERSION
+
+chown -R root:root .
+find . \( -type f -o -type d \) \
+ \( \( -perm 777 -o -perm 775 -o -perm 711 -o -perm 555 -o -perm 511 \) \
+ -exec chmod 755 {} \+ -o \
+ \( -perm 666 -o -perm 664 -o -perm 600 -o -perm 444 -o -perm 440 -o -perm 400 \) \
+ -exec chmod 644 {} \+ \)
+
+CFLAGS="$SLKCFLAGS" CXXFLAGS="$SLKCFLAGS" \
+meson setup build \
+  --prefix=/usr \
+  --libdir=lib${LIBDIRSUFFIX} \
+  --mandir=/usr/man \
+  --buildtype=release \
+  -Dtests=disabled \
+  -Ddocs=disabled
+
+ninja -C build $NUMJOBS
+DESTDIR=$PKG ninja -C build install
+
+# Strip, but never the .ttl/.h data that makes up much of the LV2 spec.
+find $PKG -type f \( -perm -0100 -o -name '*.so*' \) -print0 2>/dev/null \
+  | xargs -0r file 2>/dev/null | grep -E 'ELF.*(executable|shared object)' \
+  | cut -f1 -d: | xargs -r strip --strip-unneeded 2>/dev/null || true
+
+# Compress man pages the Slackware way.
+if [ -d $PKG/usr/man ]; then
+  find $PKG/usr/man -type f -name '*.[0-9]' -exec gzip -9 {} \; 2>/dev/null || true
+fi
+
+mkdir -p $PKG/usr/doc/$PRGNAM-$VERSION
+cp -a COPYING* LICENSE* README* NEWS* $PKG/usr/doc/$PRGNAM-$VERSION 2>/dev/null || true
+cat $CWD/$PRGNAM.SlackBuild > $PKG/usr/doc/$PRGNAM-$VERSION/$PRGNAM.SlackBuild
+
+mkdir -p $PKG/install
+cat $CWD/slack-desc > $PKG/install/slack-desc
+
+cd $PKG
+/sbin/makepkg -l y -c n $OUTPUT/$PRGNAM-$VERSION-$ARCH-$BUILD$TAG.txz

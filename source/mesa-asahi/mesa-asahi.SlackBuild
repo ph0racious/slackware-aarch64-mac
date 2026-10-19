@@ -1,0 +1,469 @@
+#!/bin/bash
+#
+# Slackware build script for Mesa, rebuilt WITH the Asahi (AGX) drivers
+#
+# Heavily based on Slackware AArch64's own mesa.SlackBuild -- the meson flag
+# sets below are taken from it verbatim, with 'asahi' added to the driver lists.
+#
+# Copyright 2006-2026  Patrick J. Volkerding, Sebeka, MN, USA
+# Modified by Stuart Winter <mozes@slackware.com> for Slackware ARM
+# Copyright 2026  Jim Phoenix, Earth, Milky Way
+# All rights reserved.
+#
+# Redistribution and use of this script, with or without modification, is
+# permitted provided that the following conditions are met:
+#
+# 1. Redistributions of this script must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+#
+#  THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR IMPLIED
+#  WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+#  MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO
+#  EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+#  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+#  PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+#  OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+#  WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+#  OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+#  ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+#
+# WHY THIS EXISTS
+# ---------------
+# The Apple GPU works at the kernel level: the Rust `asahi` driver binds the
+# M1/M2 AGX (`apple,agx-t8103`, `apple,agx-t8112` and their Pro/Max/Ultra
+# variants), presents /dev/dri/renderD128, and the stable upstream asahi_drm.h
+# UAPI is installed. What is missing is entirely in userspace -- Slackware's
+# Mesa is built WITHOUT `asahi` in either driver list:
+#
+#   -Dgallium-drivers=...,lima,panfrost        <- no asahi
+#   -Dvulkan-drivers=...,freedreno,panfrost    <- no asahi
+#
+# so there is no asahi_dri.so, no AGX symbols in libgallium, and no Vulkan ICD.
+# Every GL client therefore falls back to llvmpipe and renders on the CPU, no
+# matter how well the kernel driver works.
+#
+# This package is Slackware's Mesa plus `asahi` appended to both lists, minus
+# mesa-amber's classic drivers, which no Apple Silicon Mac can host. The
+# superset check near the end names every difference it allows.
+#
+# RELATIONSHIP TO SLACKWARE'S PACKAGE
+# -----------------------------------
+# The meson flags below are copied verbatim from Slackware AArch64's own
+# mesa.SlackBuild (the $ARCH=aarch64 branch), with `,asahi` appended to
+# GALLIUM_DRIVERS and VULKAN_DRIVERS. The upstream version is kept identical to
+# whatever Slackware ships, so this is a rebuild, not an upgrade.
+#
+# Slackware applies NO patches to Mesa -- its patches/ and patches-revert/
+# directories are both empty, and the ARM tree carries no Debian diffs. Stock
+# Mesa is vanilla upstream, which is why this script does not carry any either.
+#
+# It cannot literally reuse Slackware's SlackBuild: like its pipewire one, that
+# script depends on Stuart Winter's ARM build framework (slackbuildinfo,
+# slackset_var_cwds, mkpkgdirs, failextract, ...) and is not standalone.
+#
+# The package NAME is deliberately 'mesa' (not 'mesa-asahi') so it upgrades and
+# replaces the stock package rather than colliding with it. The source directory
+# is named mesa-asahi only to distinguish this build recipe.
+#
+# THE DEMO BINARIES ARE PART OF THIS PACKAGE, AND THAT IS A TRAP
+# --------------------------------------------------------------
+# Slackware's `mesa` package ships the mesa-demos binaries inside it --
+# glxinfo, glxgears, eglinfo and friends -- built by a separate call-out
+# (mesa-demos.build) and moved into usr/bin. They are NOT a separate package.
+#
+# A rebuild that only builds Mesa therefore SILENTLY DELETES them on
+# upgradepkg, because upgradepkg removes files the old package had and the new
+# one does not. That takes out glxinfo and eglinfo -- the exact tools used to
+# verify whether this package worked. So mesa-demos is built here too, and the
+# same MESA_DEMO_BINS list Slackware AArch64 installs is applied.
+#
+# The superset assertion near the end exists for the general form of that
+# mistake: this package must contain every path and symlink stock's did.
+#
+# WHEN THE BASE IS RE-PINNED this package must be rebuilt to match its mesa.
+# The version check and the superset check below both read the stock package
+# from the mounted base (docs/BUILD.md step 2); STOCK_TREE overrides where.
+#
+# Run tools/fetch-sources.sh mesa-asahi to populate sources/.
+#
+# BUILD THIS NATIVELY, like everything else here. Mesa is large, and emulated
+# builds take many hours where a native one does not.
+#
+# ⚠ THIS BUILD NEEDS NETWORK. Stock enables rusticl, and meson fetches its Rust
+# crates (syn, quote, proc-macro2, unicode-ident, paste, rustc-hash) from
+# crates.io at configure time. Stock's driver list also includes d3d12, whose
+# DirectX-Headers dependency is a meson WRAP fetched the same way. Nothing in
+# this tree pins either.
+#
+# The wrap is what puts the DirectX-Headers development files in the package,
+# as stock's has them. Meson prefers a DirectX-Headers.pc already installed on
+# the build host, so stock's script deletes that first, and so does this one;
+# the superset check below then requires the files.
+
+cd $(dirname $0) ; CWD=$(pwd)
+
+PRGNAM=mesa                # deliberately replaces the stock package
+SRCNAM=mesa
+VERSION=${VERSION:-26.1.1}
+DEMOVERS=${DEMOVERS:-9.0.0}
+BUILD=${BUILD:-2}          # bumped: distinguishes our rebuild from Slackware's
+TAG=${TAG:-_mac}
+
+if [ -z "$ARCH" ]; then
+  ARCH=$( uname -m )
+fi
+
+if [ ! -z "${PRINT_PACKAGE_NAME}" ]; then
+  echo "$PRGNAM-$VERSION-$ARCH-$BUILD$TAG.txz"
+  exit 0
+fi
+
+NUMJOBS=${NUMJOBS:-"-j$(nproc)"}
+
+TMP=${TMP:-/tmp/mac}
+PKG=$TMP/package-$PRGNAM
+OUTPUT=${OUTPUT:-/tmp}
+
+if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "x86_64" ]; then
+  LIBDIRSUFFIX="64"
+else
+  LIBDIRSUFFIX=""
+fi
+
+# Slackware AArch64's own flags for this package, word for word, and applied.
+# Stock ARM's script writes `CFLAGS=... \ mkdir meson-build`, which binds them
+# to mkdir alone, so its meson never sees them and its libraries import no
+# _chk symbols. Pat's x86 script exports them before `meson setup`, and so
+# does this one, so here they take effect.
+SLKCFLAGS="-O2 -fPIC -fexceptions -g -pipe -Wall -Werror=format-security -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS"
+SLKCXXFLAGS="$SLKCFLAGS"
+SLKLDFLAGS="-Wl,-z,relro -Wl,--as-needed"
+
+set -e
+
+# THE REFERENCE IS THE BASE'S PACKAGE, NOT WHAT IS INSTALLED HERE.
+#
+# On a build host installed from this port's own medium, /var/log/packages
+# holds THIS package from the last build, so comparing against it proves only
+# that the build matches itself. Read the stock package off the pinned base,
+# which docs/BUILD.md step 2 mounts (sha256-verified) for the whole build.
+STOCK_TREE=${STOCK_TREE:-/mnt/iso/slackware/slackwareaarch64-current/slackware}
+STOCK_PKG=$(ls $STOCK_TREE/x/$PRGNAM-[0-9]*.txz 2>/dev/null | grep -v '_mac\.txz$' | head -1)
+[ -n "$STOCK_PKG" ] || {
+  echo "$PRGNAM: no stock mesa package under $STOCK_TREE/x." >&2
+  echo "  Mount the pinned base at /mnt/iso (docs/BUILD.md step 2); the version" >&2
+  echo "  and superset checks compare this build with that package." >&2
+  exit 1; }
+# Refuse to build blind against a different stock version: a mismatch means our
+# package would be an unintended upgrade or downgrade of a core component, and
+# Mesa is about as core as it gets; getting this wrong takes X, GL and
+# everything linking libGL/libEGL with it.
+STOCKVER=$(basename "$STOCK_PKG" | sed -E 's/^mesa-([0-9][^-]*)-.*/\1/')
+if [ "$STOCKVER" != "$VERSION" ]; then
+  echo "$PRGNAM: the base's mesa is $STOCKVER but this builds $VERSION." >&2
+  echo "  Rebuilding would change the version of a core package." >&2
+  echo "  Set VERSION=$STOCKVER and fetch the matching source." >&2
+  exit 1
+fi
+
+# The asahi Gallium driver needs no special dependency of its own -- its
+# compiler lives inside Mesa -- but rusticl (which stock enables) needs the
+# Rust toolchain, and -Dllvm=enabled needs LLVM. Say so clearly rather than
+# failing late in the build.
+for need in rustc bindgen llvm-config; do
+  command -v $need >/dev/null 2>&1 || {
+    echo "$PRGNAM: $need not found -- stock Mesa is built with -Dgallium-rusticl=true" >&2
+    echo "  and -Dllvm=enabled, so rust, rust-bindgen and llvm must be installed." >&2
+    exit 1
+  }
+done
+
+# ---------------------------------------------------------------------------
+# Driver lists: Slackware AArch64's, plus asahi.
+# ---------------------------------------------------------------------------
+GALLIUM_DRIVERS="nouveau,r300,r600,svga,radeonsi,softpipe,llvmpipe,virgl,iris,crocus,zink,d3d12"
+GALLIUM_DRIVERS+=",freedreno,etnaviv,tegra,vc4,v3d,lima,panfrost"
+GALLIUM_DRIVERS+=",asahi"                      # <-- the entire point of this package
+VULKAN_DRIVERS="virtio,nouveau,swrast,amd,broadcom,freedreno,panfrost"
+VULKAN_DRIVERS+=",asahi"                       # honeykrisp
+VULKAN_LAYERS="device-select,overlay"
+CODECS="h264dec,h264enc,h265dec,h265enc,vc1dec,av1dec,av1enc,vp9dec"
+
+# The demo binaries Slackware AArch64 keeps out of mesa-demos. Verbatim.
+MESA_DEMO_BINS=${MESA_DEMO_BINS:-"eglinfo es2_info es2gears_x11 gears glinfo glthreads glxcontexts glxdemo glxgears glxgears_fbconfig glxheads glxinfo glxpbdemo glxpixmap"}
+
+rm -rf $PKG
+mkdir -p $TMP $PKG $OUTPUT
+cd $TMP
+rm -rf $SRCNAM-$VERSION
+tar xf $CWD/sources/$SRCNAM-$VERSION.tar.xz
+cd $SRCNAM-$VERSION
+
+chown -R root:root .
+find . \( -type f -o -type d \) \
+ \( \( -perm 777 -o -perm 775 -o -perm 711 -o -perm 555 -o -perm 511 \) \
+ -exec chmod 755 {} \+ -o \
+ \( -perm 666 -o -perm 664 -o -perm 600 -o -perm 444 -o -perm 440 -o -perm 400 \) \
+ -exec chmod 644 {} \+ \)
+
+export CFLAGS="$SLKCFLAGS"
+export CXXFLAGS="$SLKCXXFLAGS"
+export LDFLAGS="$SLKLDFLAGS"
+
+# Slackware's mesa.SlackBuild, verbatim (ARM and x86 alike). Without it meson
+# takes the build host's DirectX-Headers.pc when one is installed, and the
+# package silently loses the headers, two static libraries and the .pc that
+# stock's carries, so what ships depends on the host.
+# Don't use the system DirectX headers:
+rm -f /usr/lib${LIBDIRSUFFIX}/pkgconfig/DirectX-Headers.pc
+
+# Flags below are Slackware AArch64's own, verbatim, with asahi added to the
+# two driver lists above.
+mkdir meson-build
+cd meson-build
+meson setup \
+  --prefix=/usr \
+  --libdir=lib${LIBDIRSUFFIX} \
+  --libexecdir=/usr/libexec \
+  --bindir=/usr/bin \
+  --sbindir=/usr/sbin \
+  --includedir=/usr/include \
+  --datadir=/usr/share \
+  --mandir=/usr/man \
+  --sysconfdir=/etc \
+  --localstatedir=/var \
+  --buildtype=release \
+  -Dplatforms=x11,wayland \
+  -Dgallium-rusticl=true \
+  -Dgallium-extra-hud=true \
+  -Drust_std=2021 \
+  -Dgallium-drivers=$GALLIUM_DRIVERS \
+  -Dvulkan-drivers=$VULKAN_DRIVERS \
+  -Dvulkan-layers=$VULKAN_LAYERS \
+  -Dvideo-codecs="$CODECS" \
+  -Dglvnd=enabled \
+  -Dllvm=enabled \
+  -Dshared-llvm=enabled \
+  -Degl=enabled \
+  -Dgles1=enabled \
+  -Dgles2=enabled \
+  -Dopengl=true \
+  -Dglx=dri \
+  -Dlibunwind=disabled \
+  -Dmicrosoft-clc=disabled \
+  -Dvalgrind=enabled \
+  -Dintel-rt=disabled \
+  -Dgbm=enabled \
+  ..
+
+# Confirm meson actually accepted asahi in BOTH lists before spending the build
+# time. Meson silently ignoring an unknown driver, or quietly dropping one whose
+# dependencies are unmet, would produce another Mesa that cannot drive this GPU
+# -- which is precisely the situation this package exists to fix, and it would
+# not be visible until glxinfo reported llvmpipe at the end of the build.
+#
+# Ask meson directly rather than scraping `meson configure`. That table is
+# wrapped to terminal width, so the value column is TRUNCATED -- a long driver
+# list has its tail cut off, and grepping it for 'asahi' reports a false
+# failure on a build that was configured perfectly. It also prints one row per
+# subproject, most of them reading [auto], so a naive grep matches the wrong
+# line. introspect returns the real values as JSON.
+#
+driver_has_asahi() {
+  meson introspect --buildoptions 2>/dev/null | python3 -c '
+import json, sys
+want = sys.argv[1]
+for o in json.load(sys.stdin):
+    if o.get("name") == want and o.get("section") == "user":
+        v = o.get("value")
+        v = v if isinstance(v, list) else str(v).split(",")
+        sys.exit(0 if "asahi" in [str(x).strip() for x in v] else 1)
+sys.exit(1)
+' "$1"
+}
+
+for drv in gallium-drivers vulkan-drivers; do
+  if ! driver_has_asahi "$drv"; then
+    echo "$PRGNAM: meson did not accept asahi in $drv -- aborting rather than" >&2
+    echo "  shipping another Mesa that falls back to llvmpipe on this hardware." >&2
+    meson introspect --buildoptions 2>/dev/null \
+      | python3 -c 'import json,sys
+for o in json.load(sys.stdin):
+    if o.get("name") in ("gallium-drivers","vulkan-drivers") and o.get("section")=="user":
+        print("   ", o["name"], "=", o["value"])' >&2 || true
+    exit 1
+  fi
+done
+echo "$PRGNAM: meson accepted asahi in gallium-drivers and vulkan-drivers"
+
+ninja $NUMJOBS
+DESTDIR=$PKG ninja install
+cd ..
+
+# Slackware's mesa.SlackBuild, verbatim:
+# Add a default provider for glvnd when the vendor cannot be determined:
+( cd $PKG/usr/lib${LIBDIRSUFFIX}
+  if [ ! -r libGLX_system.so.0 ]; then
+    ln -sf libGLX_mesa.so.0 libGLX_system.so.0
+  fi )
+
+# ---------------------------------------------------------------------------
+# mesa-demos -- part of Slackware's mesa package, see the header note.
+# ---------------------------------------------------------------------------
+cd $TMP
+rm -rf mesa-demos-$DEMOVERS
+tar xf $CWD/sources/mesa-demos-$DEMOVERS.tar.xz
+cd mesa-demos-$DEMOVERS
+chown -R root:root .
+mkdir meson-build
+cd meson-build
+meson setup \
+  --prefix=/usr \
+  --libdir=lib${LIBDIRSUFFIX} \
+  --libexecdir=/usr/libexec \
+  --bindir=/usr/bin \
+  --sbindir=/usr/sbin \
+  --includedir=/usr/include \
+  --datadir=/usr/share \
+  --mandir=/usr/man \
+  --sysconfdir=/etc \
+  --localstatedir=/var \
+  --buildtype=release \
+  ..
+ninja $NUMJOBS
+# Install to a scratch tree, then keep only the binaries Slackware keeps.
+rm -rf $TMP/demos-cruft
+DESTDIR=$TMP/demos-cruft ninja install
+mkdir -p $PKG/usr/bin
+for b in $MESA_DEMO_BINS; do
+  if [ -x "$TMP/demos-cruft/usr/bin/$b" ]; then
+    cp -a "$TMP/demos-cruft/usr/bin/$b" $PKG/usr/bin/
+  else
+    echo "$PRGNAM: WARNING: demo binary '$b' was not built" >&2
+  fi
+done
+# Stock ships the demos' own doc directory inside the mesa package too.
+mkdir -p $PKG/usr/doc/mesa-demos-$DEMOVERS
+cd $TMP/mesa-demos-$DEMOVERS
+cp -a README.rst docs/README.rst $PKG/usr/doc/mesa-demos-$DEMOVERS/ 2>/dev/null || true
+cd $TMP/$SRCNAM-$VERSION
+
+# ---------------------------------------------------------------------------
+# Prove the driver actually landed, before packaging.
+# ---------------------------------------------------------------------------
+if [ ! -e $PKG/usr/lib${LIBDIRSUFFIX}/dri/asahi_dri.so ]; then
+  echo "$PRGNAM: asahi_dri.so was NOT produced -- the build did not create the" >&2
+  echo "  Asahi driver even though meson said it would. Refusing to package." >&2
+  ls $PKG/usr/lib${LIBDIRSUFFIX}/dri/ 2>/dev/null | head -20 | sed 's/^/    /' >&2
+  exit 1
+fi
+echo "$PRGNAM: asahi_dri.so present"
+
+find $PKG -type f \( -perm -0100 -o -name '*.so*' \) -print0 2>/dev/null \
+  | xargs -0r file 2>/dev/null | grep -E 'ELF.*(executable|shared object)' \
+  | cut -f1 -d: | xargs -r strip --strip-unneeded 2>/dev/null || true
+# Static archives too, as Slackware ARM's slackstripall does (strip -p -g):
+# the DirectX-Headers libraries otherwise ship with their debug info, several
+# times the size of stock's.
+find $PKG -name '*.a' -type f -print0 | xargs -0r strip -p -g
+
+# Compress man pages the Slackware way.
+if [ -d $PKG/usr/man ]; then
+  find $PKG/usr/man -type f -name '*.[0-9]' -exec gzip -9 {} \; 2>/dev/null || true
+fi
+
+# Documentation, matching the set stock installs. This runs BEFORE the superset
+# check below, because the check treats a missing doc file as seriously as a
+# missing library -- both vanish from the running system on upgradepkg.
+mkdir -p $PKG/usr/doc/$PRGNAM-$VERSION
+cp -a CODEOWNERS README.rst VERSION \
+      docs/README.UVD docs/README.VCE docs/license.rst \
+      $PKG/usr/doc/$PRGNAM-$VERSION/ 2>/dev/null || true
+cat $CWD/mesa-asahi.SlackBuild > $PKG/usr/doc/$PRGNAM-$VERSION/$PRGNAM.SlackBuild
+
+# ---------------------------------------------------------------------------
+# SUPERSET ASSERTION: nothing stock provided may be removed.
+#
+# upgradepkg deletes files the old package had and the new one does not, so a
+# missing path here is not a packaging nit -- it is a file that disappears off
+# the running system the moment this is installed. The demo binaries are one
+# such case; the check is general.
+#
+# It covers every path stock ships, etc/ included (rusticl's ICD lives there),
+# and every symlink. makepkg moves symlinks into install/doinst.sh, so a tar
+# listing never shows them: they are read from stock's doinst.sh and must exist
+# here, pointing at the same target. That is how a missing libGLX_system.so.0,
+# glvnd's fallback provider, once slipped through.
+# ---------------------------------------------------------------------------
+#
+# DELIBERATE, DOCUMENTED EXCEPTIONS. Everything here is for hardware that
+# cannot physically exist in an Apple Silicon machine. Listing them explicitly
+# keeps the check useful: an UNEXPECTED removal still fails the build, which is
+# the whole point.
+#
+#   mesa-amber's three classic DRI drivers, and libglapi which ONLY they link.
+#   Nothing else on the system links libglapi, so the four of them are a
+#   self-contained island. r200/radeon are AGP-era Radeons
+#   and nouveau_vieux is pre-NV50 NVIDIA -- none can be attached to an Apple
+#   Silicon Mac. Stock builds them via a separate mesa-amber 21.3.9 call-out;
+#   this build does not.
+#
+# NOT excepted: the DirectX-Headers development files (headers under
+# usr/include, two static libraries and the .pc). With stock's line above
+# removing the host's .pc, the wrap supplies them on every build host, as it
+# does for stock, so their absence fails here.
+#
+EXPECT_ABSENT='^usr/lib64/dri/(nouveau_vieux|r200|radeon)_dri\.so$|^usr/lib64/libglapi\.so|^usr/doc/mesa-amber-'
+
+STOCK_DOINST=$(mktemp)
+tar xJOf "$STOCK_PKG" install/doinst.sh > "$STOCK_DOINST" 2>/dev/null \
+  && grep -q ' ; ln -sf ' "$STOCK_DOINST" \
+  || { echo "$PRGNAM: cannot read the symlinks in $(basename "$STOCK_PKG")'s doinst.sh" >&2
+       rm -f "$STOCK_DOINST"; exit 1; }
+
+MISSING=$(mktemp)
+{
+  tar tJf "$STOCK_PKG" | grep -vE '^(\./|install/)' \
+    | grep -vE "$EXPECT_ABSENT" | while read -r f; do
+    [ -e "$PKG/$f" ] || echo "$f"
+  done
+  sed -nE 's|^\( cd ([^ ]+) ; ln -sf ([^ ]+) ([^ ]+) \)$|\1/\3 -> \2|p' "$STOCK_DOINST" \
+    | grep -vE "$EXPECT_ABSENT" | while read -r l; do
+    p=${l%% -> *}; t=${l#* -> }
+    [ -L "$PKG/$p" ] && [ "$(readlink "$PKG/$p")" = "$t" ] || echo "$l"
+  done
+} > "$MISSING"
+if [ -s "$MISSING" ]; then
+  echo "$PRGNAM: this build is MISSING paths or symlinks $(basename "$STOCK_PKG") provides:" >&2
+  head -30 "$MISSING" | sed 's/^/    /' >&2
+  echo "  ($(wc -l < "$MISSING") total.) Installing it would delete these" >&2
+  echo "  from the running system. Refusing to package." >&2
+  rm -f "$MISSING" "$STOCK_DOINST"
+  exit 1
+fi
+rm -f "$MISSING"
+
+# Beyond symlinks, stock's doinst.sh only defines a config() it never calls:
+# its one call, for etc/drirc.new, is commented out. If a re-pinned base's does
+# more, that logic has to be ported here, so fail rather than drop it.
+_logic=$(grep -vE '^\( cd [^ ]+ ; (rm -rf [^ ]+|ln -sf [^ ]+ [^ ]+) \)$' "$STOCK_DOINST" \
+  | grep -vE '^[[:space:]]*(#|$)' \
+  | awk '/^config\(\) \{$/ {skip=1; next} skip && /^\}$/ {skip=0; next} !skip')
+rm -f "$STOCK_DOINST"
+if [ -n "$_logic" ]; then
+  echo "$PRGNAM: $(basename "$STOCK_PKG")'s doinst.sh does more than make symlinks:" >&2
+  echo "$_logic" | sed 's/^/    /' >&2
+  echo "  Port it here, or document why not. Refusing to package." >&2
+  exit 1
+fi
+echo "$PRGNAM: superset check OK; every path and symlink in $(basename "$STOCK_PKG") is present"
+
+# Slackware ARM's slack644docs: every doc file 0644. cp -a keeps a source's own
+# mode, and mesa-demos' README.rst arrives group-writable.
+find $PKG/usr/doc -type f -exec chmod 644 {} \+
+
+mkdir -p $PKG/install
+cat $CWD/slack-desc > $PKG/install/slack-desc
+
+cd $PKG
+/sbin/makepkg -l y -c n $OUTPUT/$PRGNAM-$VERSION-$ARCH-$BUILD$TAG.txz

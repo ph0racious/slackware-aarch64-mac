@@ -1,0 +1,181 @@
+#!/bin/bash
+
+# Slackware build script for speakersafetyd (Apple Silicon speaker protection)
+
+# Copyright 2026  Jim Phoenix, Earth, Milky Way
+# All rights reserved.
+#
+# Redistribution and use of this script, with or without modification, is
+# permitted provided that the following conditions are met:
+#
+# 1. Redistributions of this script must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+#
+#  THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR IMPLIED
+#  WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+#  MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO
+#  EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+#  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+#  PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+#  OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+#  WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+#  OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+#  ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+# SAFETY-CRITICAL PACKAGE.
+#
+# Apple Silicon laptops drive their speakers well beyond what the drivers can
+# survive unprotected; the amplifiers rely on a software feedback loop to limit
+# the speakers' temperature.  Asahi's macaudio driver holds the speakers at a
+# reduced volume until this daemon is running, and the daemon lifts that limit
+# while it monitors them.  It must be running for the speakers to work properly.
+#
+# INIT SYSTEM (see docs/PORTING.md, "Init system"):
+# Upstream targets systemd.  tools/check-init-deps.sh --source reports six
+# findings for this package; each is handled deliberately here:
+#
+#   speakersafetyd.service          -> NOT installed.  We ship
+#                                      /etc/rc.d/rc.speakersafetyd instead.
+#   udev SYSTEMD_WANTS              -> the rule is still installed: its
+#                                      ENV{ACP_IGNORE} line is useful under
+#                                      eudev, and its service-launching lines,
+#                                      inert as launchers, record where
+#                                      upstream runs the daemon.  Startup comes
+#                                      from /etc/rc.d/rc.platform.d/aarch64/,
+#                                      and rc.speakersafetyd starts it only
+#                                      there.
+#   DynamicUser=/User=              -> no Slackware equivalent; runs as root.
+#   AmbientCapabilities=CAP_SYS_NICE-> implicit as root.
+#   Restart=on-failure              -> no SysV equivalent; rc script verifies
+#                                      the daemon stayed up and says so loudly.
+#   Makefile UNITDIR=               -> pointed at a throwaway dir and deleted.
+#
+# Build deps: rust (cargo), alsa-lib.
+# Note: AsahiLinux/PKGBUILDs pins rustc 1.93.1 in a rust-toolchain.toml beside
+# its PKGBUILD; that is a rustup mechanism, and Slackware has no rustup, so
+# cargo uses the system rustc.
+#
+# Run tools/fetch-sources.sh speakersafetyd to populate sources/.
+
+cd $(dirname $0) ; CWD=$(pwd)
+
+PRGNAM=speakersafetyd
+VERSION=${VERSION:-2.0.1}
+BUILD=${BUILD:-1}
+TAG=${TAG:-_mac}
+
+if [ -z "$ARCH" ]; then
+  ARCH=$( uname -m )
+fi
+
+if [ ! -z "${PRINT_PACKAGE_NAME}" ]; then
+  echo "$PRGNAM-$VERSION-$ARCH-$BUILD$TAG.txz"
+  exit 0
+fi
+
+if [ "$( uname -m )" != "aarch64" ]; then
+  echo "$PRGNAM: this package is Apple Silicon only; build on aarch64." >&2
+  exit 1
+fi
+
+NUMJOBS=${NUMJOBS:-"-j$(nproc)"}
+
+TMP=${TMP:-/tmp/mac}
+PKG=$TMP/package-$PRGNAM
+OUTPUT=${OUTPUT:-/tmp}
+
+set -e
+
+rm -rf $PKG
+mkdir -p $TMP $PKG $OUTPUT
+cd $TMP
+rm -rf $PRGNAM-$VERSION
+tar xf $CWD/sources/$PRGNAM-$VERSION.tar.gz
+cd $PRGNAM-$VERSION
+
+chown -R root:root .
+find . \( -type f -o -type d \) \
+ \( \( -perm 777 -o -perm 775 -o -perm 711 -o -perm 555 -o -perm 511 \) \
+ -exec chmod 755 {} \+ -o \
+ \( -perm 666 -o -perm 664 -o -perm 600 -o -perm 444 -o -perm 440 -o -perm 400 \) \
+ -exec chmod 644 {} \+ \)
+
+# Upstream patch: write full speaker names in the J504 config.
+patch -p1 --fuzz=0 --no-backup-if-mismatch \
+  -i $CWD/patches/0001-j504-Write-the-full-speaker-names-in-conf.patch
+
+make $NUMJOBS
+
+# Install via upstream's own targets, but divert the systemd unit into a
+# throwaway directory so it never reaches the package.  UDEVDIR is a real
+# Slackware path: /lib/udev/rules.d is where eudev reads rules from.
+make DESTDIR="$PKG" \
+     UNITDIR=/discard-systemd-unit \
+     UDEVDIR=/lib/udev/rules.d \
+     SHAREDIR=/usr/share \
+     install
+rm -rf "$PKG/discard-systemd-unit"
+
+# rc.speakersafetyd starts the daemon only where this rule's SYSTEMD_WANTS
+# lines match, read back from eudev's record, so a rule that stopped asking
+# for the service would leave it off everywhere, silently.
+grep -qE '^KERNEL=="pcmC\*D2c", ATTRS\{id\}=="AppleJ[0-9a-z]+", .*ENV\{SYSTEMD_WANTS\}="speakersafetyd\.service"' \
+  "$PKG/lib/udev/rules.d/95-speakersafetyd.rules" \
+  || { echo "$PRGNAM: the udev rule no longer asks for speakersafetyd on any model" >&2; exit 1; }
+
+# Sanity: the whole point of this package is a daemon that actually runs.
+[ -x "$PKG/usr/bin/speakersafetyd" ] || { echo "$PRGNAM: binary missing" >&2; exit 1; }
+ls "$PKG"/usr/share/speakersafetyd/apple/* >/dev/null 2>&1 \
+  || { echo "$PRGNAM: no speaker configs installed -- daemon cannot protect anything" >&2; exit 1; }
+strip --strip-unneeded $PKG/usr/bin/$PRGNAM 2>/dev/null || true
+
+# The Slackware replacement for the systemd unit, shipped as .new.  The
+# executable bit on /etc/rc.d/rc.* is Slackware's enable switch, and the .new
+# ships with it set, so a fresh install is enabled; doinst.sh installs it with
+# stock's preserve_perms(), so an upgrade keeps whatever mode the admin left.
+# See doinst.sh for why this service is enabled by default.
+mkdir -p $PKG/etc/rc.d
+install -m755 $CWD/rc.speakersafetyd $PKG/etc/rc.d/rc.speakersafetyd.new
+
+# THE BOOT HOOK IS A PACKAGE FILE, NOT AN EDIT TO rc.local.
+#
+# Slackware ARM's rc.platform, which rc.M runs just before rc.local, sources
+# every file in /etc/rc.d/rc.platform.d/aarch64/: Stuart's hardware-model
+# hook, where sysvinit-scripts' own sc8280xp helper starts pd-mapper. A file
+# here is owned by this package, so removepkg takes it along, and nothing
+# touches the admin's rc.local. Not .new and mode 644, as Stuart's are: it is
+# sourced, not executed, and the enable switch stays rc.speakersafetyd's
+# executable bit.
+#
+# This is the one thing that starts speaker protection at boot. Assert both
+# that it is in the package and that it still names the rc script, and that
+# doinst.sh has not gone back to writing rc.local.
+install -Dm644 $CWD/rc.platform.d-$PRGNAM $PKG/etc/rc.d/rc.platform.d/aarch64/$PRGNAM
+bash -n $PKG/etc/rc.d/rc.platform.d/aarch64/$PRGNAM \
+  || { echo "$PRGNAM: the boot hook does not parse" >&2; exit 1; }
+grep -qF '/etc/rc.d/rc.speakersafetyd start' $PKG/etc/rc.d/rc.platform.d/aarch64/$PRGNAM \
+  || { echo "$PRGNAM: the boot hook no longer starts rc.speakersafetyd" >&2; exit 1; }
+grep -vE '^[[:space:]]*#' $CWD/doinst.sh | grep -qF 'etc/rc.d/rc.local' \
+  && { echo "$PRGNAM: doinst.sh writes rc.local again -- that leaves rc.local.new behind" >&2; exit 1; }
+echo "$PRGNAM: boot hook at /etc/rc.d/rc.platform.d/aarch64/$PRGNAM"
+
+# The daemon's log is appended to by the rc script and never rotated by the
+# daemon itself, so ship a logrotate entry, as stock's wpa_supplicant does:
+# .new, installed by config() in doinst.sh. copytruncate, because the daemon
+# keeps the file open.
+install -Dm644 $CWD/logrotate.d-$PRGNAM $PKG/etc/logrotate.d/$PRGNAM.new
+grep -qx '    copytruncate' $PKG/etc/logrotate.d/$PRGNAM.new \
+  || { echo "$PRGNAM: the logrotate entry does not use copytruncate" >&2; exit 1; }
+grep -qF "config etc/logrotate.d/$PRGNAM.new" $CWD/doinst.sh \
+  || { echo "$PRGNAM: doinst.sh does not install the logrotate entry" >&2; exit 1; }
+
+mkdir -p $PKG/usr/doc/$PRGNAM-$VERSION
+cp -a LICENSE README.md $PKG/usr/doc/$PRGNAM-$VERSION 2>/dev/null || true
+cat $CWD/$PRGNAM.SlackBuild > $PKG/usr/doc/$PRGNAM-$VERSION/$PRGNAM.SlackBuild
+
+mkdir -p $PKG/install
+cat $CWD/slack-desc > $PKG/install/slack-desc
+cat $CWD/doinst.sh > $PKG/install/doinst.sh
+
+cd $PKG
+/sbin/makepkg -l y -c n $OUTPUT/$PRGNAM-$VERSION-$ARCH-$BUILD$TAG.txz

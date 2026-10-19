@@ -1,0 +1,19 @@
+# HOW TO EDIT THIS FILE:
+# The "handy ruler" below makes it easier to edit a package description.
+# Line up the first '|' above the ':' following the base package name, and
+# the '|' on the right side marks the last column you can put a character in.
+# You must make exactly 11 lines for the formatting to be correct. It's also
+# customary to leave one space after the ':' except on otherwise blank lines.
+
+          |-----handy-ruler------------------------------------------------------|
+hwm-bw-mac: hwm-bw-mac (Boot Loader firmware for Apple Silicon Macs)
+hwm-bw-mac:
+hwm-bw-mac: The m1n1 stage 2 boot loader and the U-Boot UEFI environment that it
+hwm-bw-mac: loads, plus the Apple device trees for M1 and M2 family machines.
+hwm-bw-mac:
+hwm-bw-mac: A fresh install boots the m1n1 and U-Boot that the Asahi installer
+hwm-bw-mac: put on the EFI partition; update-m1n1 replaces them with these.
+hwm-bw-mac:
+hwm-bw-mac: Contains m1n1 1.5.2 and U-Boot 2026.04.asahi2.
+hwm-bw-mac: Homepage: https://asahilinux.org/
+hwm-bw-mac:

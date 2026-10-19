@@ -1,0 +1,19 @@
+# HOW TO EDIT THIS FILE:
+# The "handy ruler" below makes it easier to edit a package description.
+# Line up the first '|' above the ':' following the base package name, and
+# the '|' on the right side marks the last column you can put a character in.
+# You must make exactly 11 lines for the formatting to be correct. It's also
+# customary to leave one space after the ':' except on otherwise blank lines.
+
+               |-----handy-ruler------------------------------------------------------|
+lsp-plugins-lv2: lsp-plugins-lv2 (LSP audio plugin suite, LV2 build)
+lsp-plugins-lv2:
+lsp-plugins-lv2: Linux Studio Plugins: a large suite of audio processing plugins.
+lsp-plugins-lv2: Built with FEATURES=lv2 only, so no CLAP, VST, LADSPA, GStreamer
+lsp-plugins-lv2: or standalone JACK binaries are produced.
+lsp-plugins-lv2:
+lsp-plugins-lv2: Required by asahi-audio, whose PipeWire filter chain uses the
+lsp-plugins-lv2: loud_comp, compressor and mb_compressor plugins from this suite.
+lsp-plugins-lv2: REQUIRED by asahi-audio: supplies its compressor/loudness DSP.
+lsp-plugins-lv2: Bundles install to /usr/lib64/lv2 so hosts can find them.
+lsp-plugins-lv2: Homepage: https://lsp-plug.in/

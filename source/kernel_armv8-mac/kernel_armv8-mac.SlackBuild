@@ -1,0 +1,487 @@
+#!/bin/bash
+
+# Slackware build script for Slackware's own kernel, ported to Apple Silicon
+
+# Copyright 2026  Jim Phoenix, Earth, Milky Way
+# All rights reserved.
+#
+# Redistribution and use of this script, with or without modification, is
+# permitted provided that the following conditions are met:
+#
+# 1. Redistributions of this script must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+#
+#  THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR IMPLIED
+#  WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+#  MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO
+#  EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+#  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+#  PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+#  OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+#  WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+#  OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+#  ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+# WHAT THIS IS
+# ------------
+# Slackware's own kernel source (k/kernel-source 6.18.33) with Asahi's Apple
+# Silicon work rebased onto it: same version family as the distribution, same
+# config lineage, same packaging -- and every Apple driver present.
+#
+# That last clause is the claim the whole port rests on, and it is not taken on
+# trust. The config enables every driver that vanilla Asahi's own kernel config
+# enables for the same Asahi release (tools/migrate-kernel-config.sh), less the
+# reasoned exceptions in its PARITY_EXCEPT, and tools/check-driver-parity.sh
+# fails any package that ships less. If the gate is ever weakened, the
+# description must stop claiming parity.
+#
+# HOW THE SOURCE IS PRODUCED  (tools/rebase-asahi-onto-slackware.sh)
+# ------------------------------------------------------------------
+#   base    Slackware k/kernel-source 6.18.33, committed as-is
+#   onto it the Asahi delta v6.18.15..asahi-6.18.15-1, rebased
+#
+# Commits git drops as already upstream are the upstreaming trajectory made
+# concrete: their content reached the 6.18 stable series between 6.18.15 and
+# 6.18.33.
+# REBASE-NOTES.md records the counts and the exact SHAs, the reviewable record
+# of what was traded, and rebase/rerere-cache holds the one recorded conflict
+# resolution. The notes are regenerated, never edited, on a kernel bump.
+#
+# THE PARITY SPEC
+# ---------------
+# Vanilla Asahi's kernel config, AsahiLinux/PKGBUILDs linux-asahi/config at the
+# commit that packaged ASAHI_TAG below, fetched and checksum-pinned by
+# tools/fetch-sources.sh. It must describe the SAME Asahi release as the source's
+# delta, or the two halves describe different kernels; both are asserted below.
+#
+# WHY THE NAME CARRIES -mac
+# -------------------------
+# The name states the CLAIM: Slackware's own source, at 16K pages, carrying the
+# Apple driver delta. A build that stops applying the delta is a different
+# claim and must take a different name rather than inherit this one -- the
+# package name is what every tool here, and every installed machine's GRUB
+# block, keys off.
+#
+# WHAT A SUCCESSFUL BUILD DOES NOT PROVE
+# --------------------------------------
+# Everything here is built, packaged and gated against vanilla Asahi's driver
+# set. None of that exercises DCP, the GPU, macaudio or the keyboard
+# transports: a driver can be present, correct and never probe. Only running it
+# on the hardware settles that, which is why the port is tested by installing it
+# on a Mac and using it rather than by any check this script could contain.
+#
+# Build deps: rust, rust-src, rust-bindgen, llvm (libclang), pahole, parallel.
+
+cd $(dirname $0) ; CWD=$(pwd)
+
+PRGNAM=kernel_armv8-mac
+KVER=${KVER:-6.18.33}
+VERSION=${VERSION:-$KVER}
+BUILD=${BUILD:-1}
+TAG=${TAG:-_mac}
+ASAHI_TAG=${ASAHI_TAG:-asahi-6.18.15-1}
+
+# The platform token is `mac` everywhere: the package, the kernel release, the
+# medium, and this tarball. It is what tools/rebase-asahi-onto-slackware.sh
+# emits.
+SRCNAM=linux-$KVER-mac
+EXPECT_KREL=$KVER-armv8-mac
+
+# Where Slackware keeps the Rust stdlib source. The kernel looks under
+# <sysroot>/lib/rustlib/...; Slackware uses lib64. Without this the Rust build
+# is silently unavailable and DRM_ASAHI vanishes. Nothing errors: Kconfig just
+# stops offering the symbol, the build succeeds, and the GPU driver is absent
+# from a package that otherwise looks complete.
+RUST_LIB_SRC=/usr/lib64/rustlib/src/rust/library
+export RUST_LIB_SRC
+
+# The build timestamp in `uname -v` is rendered in the build host's timezone.
+export TZ=UTC
+
+# ...and /proc/version otherwise records who built it and on what machine, as
+# "(user@hostname)". That puts somebody's build host in every installed system.
+# Name the port instead, which is also the same string on every build host.
+export KBUILD_BUILD_USER=root
+export KBUILD_BUILD_HOST=slackware-aarch64-mac
+
+if [ -z "$ARCH" ]; then
+  ARCH=$( uname -m )
+fi
+
+if [ ! -z "${PRINT_PACKAGE_NAME}" ]; then
+  echo "$PRGNAM-$VERSION-$ARCH-$BUILD$TAG.txz"
+  exit 0
+fi
+
+if [ "$( uname -m )" != "aarch64" ]; then
+  echo "$PRGNAM: builds natively on aarch64, not $( uname -m )." >&2
+  exit 1
+fi
+
+KMAKE=( make ARCH=arm64 RUST_LIB_SRC="$RUST_LIB_SRC" )
+
+NUMJOBS=${NUMJOBS:-"-j$(nproc)"}
+
+TMP=${TMP:-/tmp/mac}
+PKG=$TMP/package-$PRGNAM
+PKGH=$TMP/package-$PRGNAM-headers
+OUTPUT=${OUTPUT:-/tmp}
+
+SRCTAR=$CWD/sources/$SRCNAM.tar.gz
+CONFIGSRC=${CONFIGSRC:-/boot/config-armv8-$KVER}
+ASAHI_CFG=$CWD/sources/config-$ASAHI_TAG
+export ASAHI_CFG
+
+set -e
+
+[ -f "$SRCTAR" ] || {
+  echo "$PRGNAM: no source tarball at $SRCTAR" >&2
+  echo "  Produce it with tools/rebase-asahi-onto-slackware.sh, which replays the" >&2
+  echo "  Asahi delta onto Slackware's own k/kernel-source and emits exactly this" >&2
+  echo "  filename. It needs git and ~25 GB, and runs on an aarch64 host." >&2
+  exit 1
+}
+[ -f "$CONFIGSRC" ] || {
+  echo "$PRGNAM: no seed config at $CONFIGSRC (ships in a/kernel_armv8)" >&2
+  exit 1
+}
+grep -q '^CONFIG_ARCH_APPLE=y' "$CONFIGSRC" || {
+  echo "$PRGNAM: $CONFIGSRC does not set CONFIG_ARCH_APPLE=y -- wrong config?" >&2
+  exit 1
+}
+[ -s "$ASAHI_CFG" ] || {
+  echo "$PRGNAM: no parity spec at $ASAHI_CFG" >&2
+  echo "  Fetch it with: tools/fetch-sources.sh kernel_armv8-mac" >&2
+  exit 1
+}
+# Both halves must describe the same Asahi release: the spec's generated header
+# names the kernel it was made for, and REBASE-NOTES.md names the delta the
+# source tarball carries.
+spec_ver=$(sed -nE '3s|^# Linux/arm64 ([0-9.]+) Kernel Configuration$|\1|p' "$ASAHI_CFG")
+tag_ver=$(echo "$ASAHI_TAG" | sed -E 's/^asahi-([0-9.]+)-[0-9]+$/\1/')
+[ -n "$spec_ver" ] && [ "$spec_ver" = "$tag_ver" ] || {
+  echo "$PRGNAM: parity spec is for Linux '${spec_ver:-?}', ASAHI_TAG is $ASAHI_TAG" >&2
+  exit 1
+}
+grep -qF "..$ASAHI_TAG\`" "$CWD/REBASE-NOTES.md" || {
+  echo "$PRGNAM: REBASE-NOTES.md does not record the $ASAHI_TAG delta --" >&2
+  echo "  the source tarball and the parity spec describe different releases." >&2
+  exit 1
+}
+
+rm -rf $PKG $PKGH
+mkdir -p $TMP $PKG $PKGH $OUTPUT
+
+# --- source ------------------------------------------------------------------
+SRCDIR=$TMP/$SRCNAM
+cd $TMP
+rm -rf $SRCDIR
+echo "$PRGNAM: unpacking $(basename $SRCTAR)"
+tar xf "$SRCTAR"
+cd $SRCDIR
+chown -R root:root .
+
+# The rebase must not have moved the kernel off Slackware's version. If it has,
+# this is no longer "Slackware's kernel, ported" and the package name lies.
+mkver=$(sed -ne 's/^VERSION *= *//p' Makefile).$(sed -ne 's/^PATCHLEVEL *= *//p' Makefile).$(sed -ne 's/^SUBLEVEL *= *//p' Makefile)
+[ "$mkver" = "$KVER" ] || {
+  echo "$PRGNAM: source tree is $mkver, expected Slackware's $KVER" >&2
+  exit 1
+}
+
+# --- carried patches ---------------------------------------------------------
+#
+# Applied at --fuzz=0, the same convention every other package in this tree
+# uses for third-party source: if the rebase moves the code these patch, the
+# build stops rather than silently landing a hunk in the wrong place.
+if [ -d "$CWD/patches" ]; then
+  for p in $CWD/patches/*.patch ; do
+    [ -e "$p" ] || continue
+    echo "$PRGNAM: applying $(basename "$p")"
+    patch -p1 --fuzz=0 --no-backup-if-mismatch -i "$p" || {
+      echo "$PRGNAM: FAILED to apply $(basename "$p")" >&2
+      exit 1
+    }
+  done
+fi
+
+# SLACKWARE SHIPS scripts/dtc/include-prefixes/ EMPTY.
+#
+# Upstream tracks 12 symlinks there (arm64 -> ../../../arch/arm64/boot/dts and
+# friends); k/kernel-source carries them only as doinst.sh lines, the way
+# makepkg stores every symlink, so an unpacked package has none. Every .dtso
+# that does #include "arm64/..." then fails with a bare:
+#
+#   drivers/misc/rp1/rp1-pci.dtso:22:34: fatal error:
+#       arm64/broadcom/rp1-common.dtsi: No such file or directory
+#
+# ...late in the build, in a Raspberry Pi driver that has nothing to do with
+# this port, which reads like a corrupt tree rather than a missing symlink
+# farm. Building in /usr/src hides it: installpkg ran that doinst.sh there, so
+# the same source works in /usr/src and fails from a fresh unpack.
+#
+# The source tarball carries them (restored from upstream during the rebase);
+# this asserts it before the build starts.
+[ -e scripts/dtc/include-prefixes/arm64/broadcom ] || {
+  echo "$PRGNAM: scripts/dtc/include-prefixes/arm64 does not resolve." >&2
+  echo "  The dtc include symlinks are missing from the source tree; any" >&2
+  echo "  device-tree overlay that includes another arch's dtsi will fail." >&2
+  echo "  Restore with: git checkout v6.18.15 -- scripts/dtc/include-prefixes/" >&2
+  exit 1
+}
+
+# --- configure ---------------------------------------------------------------
+bash $CWD/../../tools/migrate-kernel-config.sh "$PWD" "$CONFIGSRC"
+
+KVERFULL=$("${KMAKE[@]}" -s kernelrelease)
+echo "$PRGNAM: kernel release $KVERFULL"
+[ "$KVERFULL" = "$EXPECT_KREL" ] || {
+  echo "$PRGNAM: kernel release is '$KVERFULL', expected '$EXPECT_KREL'." >&2
+  echo "  Modules would land in the wrong directory and could collide." >&2
+  exit 1
+}
+grep -q '^CONFIG_PAGE_SHIFT=14$' .config || {
+  echo "$PRGNAM: .config is not 16K pages" >&2; exit 1; }
+
+# --- build -------------------------------------------------------------------
+# `dtbs` IS NOT OPTIONAL AND IS NOT IMPLIED.
+#
+# `make Image modules` builds no device trees; `make all` does, and so does an
+# explicit `dtbs` target. Without it the packaging step below finds no
+# arch/arm64/boot/dts/apple/*.dtb, which reads as the rebase not delivering
+# them when they were simply never built.
+#
+# On this hardware the DTBs matter twice over: the kernel needs one to know the
+# machine, and update-m1n1 concatenates them into the stage 2 payload.
+"${KMAKE[@]}" $NUMJOBS Image modules dtbs
+
+# --- package -----------------------------------------------------------------
+modulesdir=$PKG/lib/modules/$KVERFULL
+
+mkdir -p $PKG/boot
+install -m644 arch/arm64/boot/Image $PKG/boot/Image-armv8-mac-$KVERFULL
+install -m644 System.map            $PKG/boot/System.map-armv8-mac-$KVERFULL
+install -m644 .config               $PKG/boot/config-armv8-mac-$KVERFULL
+( cd $PKG/boot
+  ln -sf Image-armv8-mac-$KVERFULL      Image-armv8-mac
+  ln -sf System.map-armv8-mac-$KVERFULL System.map-armv8-mac
+  ln -sf config-armv8-mac-$KVERFULL     config-armv8-mac )
+
+# Duties inherited from kernel_armv8, which this replaces on its media. Without
+# slk-hwm-discover, setup's board hooks show an error dialog; without the
+# GRUB tool an installed machine has nothing to write its menuentry with
+# (grub-mkconfig refuses to run on ARM).
+HWMDISC=$CWD/../slackware-k/sbin/slk-hwm-discover
+[ -r "$HWMDISC" ] || { echo "$PRGNAM: missing $HWMDISC" >&2; exit 1; }
+mkdir -p $PKG/sbin
+sed 's/\r$//' "$HWMDISC" > $PKG/sbin/slk-hwm-discover
+chmod 755 $PKG/sbin/slk-hwm-discover
+head -1 $PKG/sbin/slk-hwm-discover | grep -q $'\r' && {
+  echo "$PRGNAM: slk-hwm-discover shebang carries CR" >&2; exit 1; }
+install -Dm755 $CWD/../../tools/grub-entry-mac $PKG/usr/sbin/grub-entry-mac
+
+# Vendor firmware is not a kernel artefact, but it ships here for the same
+# reason grub-entry-mac does: it is useless without this kernel, and the
+# machine has no Wi-Fi or Bluetooth until someone runs it. Fedora Asahi does
+# this from an initramfs hook; this port's GRUB entry carries no initrd, so nothing
+# would otherwise move the firmware off the ESP into a search path.
+install -Dm755 $CWD/../../tools/vendorfw-install-mac $PKG/usr/sbin/vendorfw-install-mac
+
+# The tester's tool. A tester submits its --tester block and nothing else, so it
+# has to be on the machine they installed -- not in a repository they may never
+# have cloned.
+install -Dm755 $CWD/../../tools/verify-install-mac $PKG/usr/sbin/verify-install-mac
+# It runs as root, and stock Slackware leaves fs.protected_symlinks off: its
+# scratch files belong in a mktemp directory, never at a fixed /tmp path.
+grep -q '/tmp/' $PKG/usr/sbin/verify-install-mac && {
+  echo "$PRGNAM: verify-install-mac writes a fixed path under /tmp" >&2; exit 1; }
+
+# ...and the installer-time hook that runs it, as a plain Slackware setup
+# script. SeTconfig runs $T_PX/var/log/setup/setup.* in sorted order and never
+# checks their exit status; Stuart ships board-specific install-time work the
+# same way (setup.11.bootloader-flash-lx2160acex7). The name sorts after
+# setup.timeconfig on purpose -- see the comment in the script.
+install -Dm755 $CWD/setup.vendorfw-mac $PKG/var/log/setup/setup.vendorfw-mac
+
+# Plasma power management defaults, shipped .new so an edited file survives an
+# upgrade. Stock profile minus the [*][SuspendSession] groups: no device tree
+# node on this platform declares wakeup-source, so only the power button (or a
+# laptop lid) can end a sleep, and an idle machine would look powered off.
+# Screen blanking, lid action and sleep on demand are untouched. It ships here
+# rather than with the desktop because it is a fact about this hardware.
+mkdir -p $PKG/etc/xdg
+install -m644 $CWD/powermanagementprofilesrc \
+  $PKG/etc/xdg/powermanagementprofilesrc.new
+# Match the group header at line start, not the word: the file's own comment
+# explains which groups were removed and would otherwise trip this.
+if grep -qE '^\[[^]]+\]\[SuspendSession\]' \
+     $PKG/etc/xdg/powermanagementprofilesrc.new; then
+  echo "$PRGNAM: a SuspendSession group is still in the shipped profile" >&2
+  exit 1
+fi
+echo "$PRGNAM: idle suspend disabled in the shipped Plasma profile"
+
+# Suspend itself, allowed again. Slackware ARM's installer sets AllowSuspend=no
+# on every ARM machine (helper.scr/010-pwrmgmt: "power management just doesn't
+# seem to work well for us on ARM"); this hardware suspends to idle and wakes
+# on the SMC. elogind reads sleep.conf.d after sleep.conf, so the drop-in
+# overrides the installer's edit without patching the installer. Hibernation
+# stays off.
+mkdir -p $PKG/etc/elogind/sleep.conf.d
+install -m644 $CWD/elogind-sleep-mac.conf \
+  $PKG/etc/elogind/sleep.conf.d/20-mac.conf.new
+grep -qx 'AllowSuspend=yes' $PKG/etc/elogind/sleep.conf.d/20-mac.conf.new || {
+  echo "$PRGNAM: the elogind drop-in does not allow suspend" >&2; exit 1; }
+echo "$PRGNAM: suspend allowed by the shipped elogind drop-in"
+
+"${KMAKE[@]}" INSTALL_MOD_PATH="$PKG" INSTALL_MOD_STRIP=1 modules_install
+rm -f $modulesdir/{source,build}
+
+# MODULES SHIP xz-COMPRESSED, AS STOCK'S DO.
+#
+# Neither config sets MODULE_COMPRESS: Slackware ARM's kernel.SlackBuild
+# compresses at packaging time, with these lines (its XZ_OPTS written inline),
+# and kmod, built +XZ, loads .ko.xz. Uncompressed, the module tree is about
+# 264 MB on every install against stock's 56 MB. The installer's initrd copies
+# this tree, and stock's installer already loads .ko.xz the same way.
+( cd $PKG
+  find ./lib/modules -type f -name "*.ko" | parallel xz --threads 0 -ez9f -C crc32
+  for i in $(find ./lib/modules -type l -name "*.ko") ; do ln -vfs $( readlink $i ).xz $i.xz ; rm -fv $i ; done
+  find lib/modules -type d -mindepth 1 -maxdepth 1 -printf "%f\n" | xargs -i depmod {} -b. )
+# Assert the result rather than trust the pipeline: a module it skipped would
+# ship uncompressed, and a modules.dep left naming .ko files would point
+# modprobe at files that no longer exist.
+if find $modulesdir -type f -name '*.ko' | grep -q . ; then
+  echo "$PRGNAM: uncompressed modules remain after xz" >&2
+  exit 1
+fi
+grep -q '\.ko\.xz:' $modulesdir/modules.dep || {
+  echo "$PRGNAM: modules.dep does not name the compressed modules" >&2; exit 1; }
+echo "$PRGNAM: modules compressed, modules.dep regenerated"
+
+# Apple device trees, shipped in the module directory as Asahi's kernel does.
+# They are built from the rebased tree: Slackware's own carries mainline's
+# Apple device trees, and the Asahi delta adds what its drivers need.
+install -d $modulesdir/dtbs
+install -m644 arch/arm64/boot/dts/apple/*.dtb $modulesdir/dtbs/ 2>/dev/null || {
+  echo "$PRGNAM: no Apple device trees built -- the rebase did not deliver them" >&2
+  exit 1; }
+
+# --- headers -----------------------------------------------------------------
+hdrdir=$PKGH/lib/modules/$KVERFULL/build
+install -Dm644 .config           $hdrdir/.config
+install -Dm644 Makefile          $hdrdir/Makefile
+install -Dm644 Module.symvers    $hdrdir/Module.symvers
+install -Dm644 System.map        $hdrdir/System.map
+cp -a --parents \
+  Kbuild Kconfig arch/arm64/Makefile scripts include \
+  arch/arm64/include arch/arm64/kernel/vmlinux.lds \
+  $hdrdir/
+( cd $PKGH/lib/modules/$KVERFULL && ln -sf build source )
+# What an out-of-tree module build needs. A tree missing any of these installs
+# cleanly and fails only when someone builds a module against it.
+for f in Module.symvers scripts/mod/modpost scripts/basic/fixdep \
+         scripts/module.lds include/generated/autoconf.h; do
+  [ -e "$hdrdir/$f" ] || { echo "$PRGNAM: the headers package lacks $f" >&2; exit 1; }
+done
+
+# --- descriptions + doc ------------------------------------------------------
+for p in $PKG $PKGH; do mkdir -p $p/install; done
+cat $CWD/slack-desc         > $PKG/install/slack-desc
+cat $CWD/doinst.sh          > $PKG/install/doinst.sh
+cat $CWD/slack-desc-headers > $PKGH/install/slack-desc
+
+mkdir -p $PKG/usr/doc/$PRGNAM-$VERSION
+cp -a COPYING $PKG/usr/doc/$PRGNAM-$VERSION 2>/dev/null || true
+cat $CWD/$PRGNAM.SlackBuild > $PKG/usr/doc/$PRGNAM-$VERSION/$PRGNAM.SlackBuild
+cat $CWD/REBASE-NOTES.md    > $PKG/usr/doc/$PRGNAM-$VERSION/REBASE-NOTES.md 2>/dev/null || true
+
+for f in sbin/slk-hwm-discover usr/sbin/grub-entry-mac \
+         usr/sbin/vendorfw-install-mac usr/sbin/verify-install-mac \
+         var/log/setup/setup.vendorfw-mac; do
+  [ -x "$PKG/$f" ] || { echo "$PRGNAM: $f missing from the package" >&2; exit 1; }
+done
+
+# THE NAME IS LOAD-BEARING. SeTconfig expands $T_PX/var/log/setup/setup.* and
+# runs the results in sorted order; this hook must land AFTER setup.timeconfig
+# or --regdom=auto has no timezone to read and the machine ships on the world
+# domain. Assert the sort rather than trusting the comment that explains it.
+if [ "$(printf '%s\n' setup.timeconfig setup.vendorfw-mac | sort | tail -1)" \
+     != setup.vendorfw-mac ]; then
+  echo "$PRGNAM: setup.vendorfw-mac no longer sorts after setup.timeconfig" >&2
+  exit 1
+fi
+echo "$PRGNAM: vendor firmware hook sorts after setup.timeconfig"
+# pkgtool's Setup menu lists each setup.* by its #BLURB line, as every stock one
+# carries; without it this entry shows blank. pkgtool takes EVERY line matching
+# '#BLURB' (grep, then cut -b8-), so a second match (a comment quoting the
+# token) would put two lines into its dialog script. Exactly one, well formed.
+grep -q '^#BLURB="..*"$' $PKG/var/log/setup/setup.vendorfw-mac \
+  && [ "$(grep -c '#BLURB' $PKG/var/log/setup/setup.vendorfw-mac)" = 1 ] \
+  || { echo "$PRGNAM: setup.vendorfw-mac needs exactly one #BLURB line for pkgtool" >&2; exit 1; }
+# SMOKE CHECK -- NOT THE PARITY GATE.
+#
+# Be clear about what this is, because a check that is mistaken for a stronger
+# one is worse than no check. The list below is TYPED, so it can only assert
+# what its author remembered. It can pass while Apple drivers vanilla Asahi
+# enables are absent from this package -- apple_wdt among them, whose absence
+# lets the SoC watchdog reset the machine mid-boot with nothing on screen to
+# say why.
+#
+# What this catches is a build that fell over wholesale: Rust silently
+# unavailable so DRM_ASAHI vanished, or a rebase that dropped drm/apple.
+#
+# THE REAL GATE is tools/check-driver-parity.sh, which derives the required set
+# from vanilla Asahi's config instead of from a list. build-installer-iso.sh
+# runs it on the kernel it is about to ship, so no medium can carry an ungated
+# kernel.
+#
+# A BUILT-IN DRIVER IS NOT A .ko, AND ITS NAME IS NOT ITS CONFIG SYMBOL.
+#
+#   * Kconfig symbol names and module file names are unrelated -- the macaudio
+#     driver is snd-soc-macaudio.ko -- so guessing the filename from CONFIG_ is
+#     a coin flip;
+#   * a =y driver is IN vmlinux and no .ko will ever exist for it.
+#
+# modules.builtin is the kernel's own record of what went in built-in, so use
+# that for =y and the filesystem for =m. Two mechanisms, because there are two
+# kinds of answer.
+#
+# DO NOT PIN WHICH FORM A DRIVER TAKES. Built-in or modular follows vanilla
+# Asahi's config and may change on any bump. Being absent from BOTH is the
+# defect, so check both mechanisms for every driver.
+missing=""
+for d in asahi snd-soc-macaudio snd-soc-apple-mca snd-soc-tas2764 snd-soc-cs42l84 \
+         appledrm phy-apple-dptx dockchannel-hid spi-hid-apple nvme-apple apple-dart; do
+  find $modulesdir -name "${d}.ko*" | grep -q . && continue
+  grep -q "/${d}\.ko\$" $modulesdir/modules.builtin && continue
+  missing="$missing $d"
+done
+[ -z "$missing" ] || {
+  echo "$PRGNAM: core Apple drivers absent from the package:$missing" >&2
+  echo "  Checked BOTH .ko under lib/modules and modules.builtin -- these are in" >&2
+  echo "  neither, so they were not built at all." >&2
+  exit 1; }
+echo "$PRGNAM: smoke check passed -- run tools/check-driver-parity.sh for the"
+echo "  derived gate; this list is typed and proves only that the build stood up."
+
+# DEVICE TREES FOR THE MACHINES THIS IS ACTUALLY FOR.
+#
+# Shipping every Apple DTB but the machine's own boots nothing. The Mac mini M2
+# and laptop DTBs are asserted, so a rebase that quietly dropped one is caught
+# here: a missing DTB is invisible at build time and fatal at boot.
+missing_dtb=""
+for d in t8112-j473 \
+         t8103-j313 t8112-j413 \
+         t8103-j293 t8112-j493 \
+         t6000-j314s t6001-j316c; do
+  [ -f "$modulesdir/dtbs/$d.dtb" ] || missing_dtb="$missing_dtb $d"
+done
+[ -z "$missing_dtb" ] || {
+  echo "$PRGNAM: device trees absent from the package:$missing_dtb" >&2
+  echo "  j473=Mac mini M2 | j313/j413=MacBook Air M1/M2" >&2
+  echo "  j293/j493=MacBook Pro 13 M1/M2 | j314s/j316c=MacBook Pro 14/16 M1 Pro/Max" >&2
+  exit 1; }
+
+( cd $PKG  && /sbin/makepkg -l y -c n $OUTPUT/$PRGNAM-$VERSION-$ARCH-$BUILD$TAG.txz )
+( cd $PKGH && /sbin/makepkg -l y -c n $OUTPUT/$PRGNAM-headers-$VERSION-$ARCH-$BUILD$TAG.txz )

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Name=Asahi Audio (PipeWire)
+Comment=Start PipeWire, pipewire-pulse and WirePlumber for Apple Silicon audio
+Exec=/usr/share/asahi-audio/start-session
+Terminal=false
+Type=Application
+X-GNOME-Autostart-Phase=Initialization
+X-KDE-autostart-phase=1

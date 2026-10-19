@@ -1,0 +1,72 @@
+asahi-diagnose: support Slackware
+
+package_versions() recognises only /etc/arch-release and /etc/fedora-release.
+On any other distribution it prints
+
+  Distribution not supported
+
+and returns, so the package list -- the section a support request is usually
+asking for -- comes back empty. Everything else in the report is correct: the
+device information, firmware versions and boot configuration all read from the
+device tree and are distribution-agnostic.
+
+Slackware has no query command that accepts a list of package names, so the
+`cmd="pacman -Q"` / `cmd="rpm -q"` shape the function is built around has
+nothing to bind to. Rather than special-case the output block, this adds a
+shell function that stands in for such a command: the existing
+`$($cmd $pkgs 2>/dev/null | sort -u)` call is left untouched, since an unquoted
+expansion invokes a function just as it would a binary.
+
+The matching needs one piece of care. A Slackware package file is named
+
+  name-version-arch-build
+
+and only the NAME may contain hyphens -- version, arch and build cannot, since
+the hyphen is the field separator. Matching a bare "^${p}-" prefix would
+therefore report kernel_armv8-mac-headers-6.18.33-aarch64-1 as a match for
+kernel_armv8-mac. Anchoring the three trailing hyphen-separated fields
+distinguishes them.
+
+The package list mirrors the intent of the Arch and Fedora ones -- kernel,
+boot, firmware, audio, graphics and the Touch Bar -- using the names under
+which those components are packaged for Slackware on Apple Silicon.
+
+asahi-diagnose is #!/bin/sh, so the helper avoids bashisms; it parses clean
+under `sh -n`.
+
+--- a/asahi-diagnose
++++ b/asahi-diagnose
+@@ -144,6 +144,19 @@
+ }
+
+
++# Slackware has no query command that accepts a list of package names, so read
++# the package database directly and let the caller's `$cmd $pkgs` shape stand.
++#
++# A Slackware package file is name-version-arch-build, and only the NAME may
++# contain hyphens. Anchoring the three trailing hyphen-separated fields is
++# therefore what distinguishes kernel_armv8-mac from kernel_armv8-mac-headers;
++# a bare "^${p}-" prefix match would report the headers package as the kernel.
++slackware_pkgs() {
++    for p in "$@"; do
++      ls /var/log/packages/ 2>/dev/null | grep -E "^${p}-[^-]+-[^-]+-[^-]+$"
++    done
++}
++
+ package_versions() {
+     echo "## Package versions"
+     if [ -e /etc/arch-release ]; then
+@@ -158,6 +171,13 @@
+             fedora-asahi-remix-scripts tiny-dfr uboot-images-armv8 kernel-16k
+             kernel-16k-modules-extra asahi-fwextract dracut-asahi update-m1n1
+             asahi-audio speakersafetyd wireplumber pipewire mesa"
++    elif [ -e /etc/slackware-version ]; then
++      cmd="slackware_pkgs"
++      pkgs="kernel_armv8-mac asahi-scripts asahi-fwextract lzfse
++            alsa-ucm-conf-asahi asahi-audio speakersafetyd tiny-dfr hwm-bw-mac
++            mesa pipewire wireplumber
++            lv2 lilv serd sord sratom zix
++            bankstown triforce-lv2 lsp-plugins-lv2"
+     else
+       echo "Distribution not supported"
+       return

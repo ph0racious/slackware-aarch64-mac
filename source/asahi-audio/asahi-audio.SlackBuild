@@ -1,0 +1,306 @@
+#!/bin/bash
+
+# Slackware build script for asahi-audio (PipeWire/WirePlumber DSP configuration)
+
+# Copyright 2026  Jim Phoenix, Earth, Milky Way
+# All rights reserved.
+#
+# Redistribution and use of this script, with or without modification, is
+# permitted provided that the following conditions are met:
+#
+# 1. Redistributions of this script must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+#
+#  THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR IMPLIED
+#  WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+#  MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO
+#  EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+#  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+#  PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+#  OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+#  WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+#  OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+#  ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+# WHAT THIS IS: configuration and FIR filter data only -- no compiled code. It
+# supplies the PipeWire filter-chain graphs and WirePlumber rules that turn raw
+# speaker access into correct sound, per machine model. It covers the M1 and M2
+# Macs Asahi supports, the Mac mini M2 included.
+#
+# THE 'aliases' STEP IS A BUILD STEP: machine variants that share a speaker
+# layout are generated from a base graph by sed at build time (graph-j473.json
+# from j274's graph.json, and so on). Upstream's install target runs 'aliases'
+# itself; both are run here anyway, and a check below catches a Makefile that
+# stops generating them.
+#
+# RUNTIME DEPENDENCIES -- all must be installed or the graphs fail to load:
+#   pipewire built with -Dlv2=enabled   (this port's pipewire rebuild)
+#   lsp-plugins-lv2   -> loud_comp_mono, compressor_stereo, mb_compressor_stereo
+#   bankstown         -> bass enhancement
+#   triforce-lv2      -> microphone beamformer (the laptops' mic.json graphs)
+# The SlackBuild checks for the LV2 plugins at build time; it cannot check that
+# the end result *sounds* right -- that needs real hardware.
+#
+# NOT SPEAKER PROTECTION: speakersafetyd is a separate, already-installed
+# package and does not depend on any of this. Audio still plays without
+# asahi-audio; it is simply not correctly processed.
+#
+# IT ALSO TURNS PIPEWIRE ON, because nothing else does.
+# ----------------------------------------------------
+# Slackware's default sound server is PulseAudio. PipeWire is opt-in, through
+# Pat's pipewire-enable.sh, which renames PipeWire's and WirePlumber's autostart
+# samples into place and switches PulseAudio off. Under PulseAudio every file
+# this package installs is inert: the graphs never load, the card is never
+# configured, and the desktop shows a dummy output that looks exactly like
+# broken hardware.
+#
+# So the package that needs PipeWire is the one that starts it. Three files,
+# all at paths this package OWNS:
+#
+#   usr/share/asahi-audio/start-session       starts pipewire, then
+#                                             pipewire-pulse and wireplumber
+#   etc/xdg/autostart/asahi-audio.desktop     runs it at KDE phase 1
+#   etc/pulse/client.conf.d/99-asahi-no-autospawn.conf
+#                                             stops the pulse CLIENT LIBRARY
+#                                             spawning a PulseAudio behind
+#                                             PipeWire's back
+#
+# ⚠ PLUS CHANGES TO ADMIN FILES, in doinst.sh, because those three are not
+# sufficient on their own:
+#
+#   1. Starting first does not win. KDE does not wait for a phase-1 entry, so
+#      it and pulseaudio.desktop run concurrently, and the launcher correctly
+#      waits for PipeWire's socket before starting pipewire-pulse -- which is
+#      exactly the window PulseAudio needs.
+#   2. The autospawn drop-in does not cover it.
+#      /usr/bin/start-pulseaudio-x11 greps /etc/pulse/client.conf LITERALLY and
+#      never reads client.conf.d, so it still sees `autospawn = yes`.
+#
+# What does work is Slackware's own switch, the one pipewire-enable.sh flips:
+# both start-pulseaudio-x11 and /etc/xdg/Xwayland-session.d/00-pulseaudio-x11
+# no-op if pulseaudio.desktop contains a literal `Hidden=true`. That file is
+# shipped .new -- Slackware admin config, not a package file -- so setting it
+# modifies no package, and pulseaudio's own config() keeps the edit across
+# upgrades. rc.asahi-audio re-asserts the switch at every boot, started from
+# this package's hook in /etc/rc.d/rc.platform.d/aarch64/. doinst.sh and
+# rc.asahi-audio carry the full reasoning.
+#
+# Run tools/fetch-sources.sh asahi-audio to populate sources/.
+
+cd $(dirname $0) ; CWD=$(pwd)
+
+PRGNAM=asahi-audio
+VERSION=${VERSION:-4.0}
+BUILD=${BUILD:-1}
+TAG=${TAG:-_mac}
+
+# Configuration and FIR data only -- no compiled objects, so the package is
+# architecture independent.
+ARCH=noarch
+
+if [ ! -z "${PRINT_PACKAGE_NAME}" ]; then
+  echo "$PRGNAM-$VERSION-$ARCH-$BUILD$TAG.txz"
+  exit 0
+fi
+
+TMP=${TMP:-/tmp/mac}
+PKG=$TMP/package-$PRGNAM
+OUTPUT=${OUTPUT:-/tmp}
+
+set -e
+
+# Warn early if the DSP plugins the graphs reference are not discoverable. This
+# is advisory rather than fatal: the package is just config, and a build host
+# need not be the machine that will run it.
+if command -v lv2ls >/dev/null 2>&1; then
+  for uri in http://lsp-plug.in/plugins/lv2/loud_comp_mono \
+             http://lsp-plug.in/plugins/lv2/compressor_stereo \
+             http://lsp-plug.in/plugins/lv2/mb_compressor_stereo \
+             https://chadmed.au/bankstown \
+             https://chadmed.au/triforce; do
+    lv2ls 2>/dev/null | grep -qxF "$uri" \
+      || echo "$PRGNAM: WARNING: $uri not currently discoverable" >&2
+  done
+fi
+
+rm -rf $PKG
+mkdir -p $TMP $PKG $OUTPUT
+cd $TMP
+rm -rf $PRGNAM-$VERSION
+tar xf $CWD/sources/$PRGNAM-$VERSION.tar.gz
+cd $PRGNAM-$VERSION
+
+chown -R root:root .
+find . \( -type f -o -type d \) \
+ \( \( -perm 777 -o -perm 775 -o -perm 711 -o -perm 555 -o -perm 511 \) \
+ -exec chmod 755 {} \+ -o \
+ \( -perm 666 -o -perm 664 -o -perm 600 -o -perm 444 -o -perm 440 -o -perm 400 \) \
+ -exec chmod 644 {} \+ \)
+
+# Generate the aliased per-model graphs, then install everything.
+make aliases
+make install DESTDIR=$PKG PREFIX=/usr DATA_DIR=/usr/share
+
+# The Makefile builds paths as $(DESTDIR)/$(DATA_DIR)/..., which yields '//'
+# when DATA_DIR is absolute -- harmless, install(1) collapses it. What matters is
+# that anything landed under /usr at all.
+if [ -d "$PKG/usr" ]; then :; else
+  echo "$PRGNAM: nothing installed under /usr" >&2; exit 1
+fi
+
+# Verify the pieces that matter: per-model FIR data and the PipeWire/WirePlumber
+# drop-ins. A silently empty package would look like success.
+MODELS=$(ls $PKG/usr/share/$PRGNAM/ 2>/dev/null | wc -l)
+echo "$PRGNAM: installed data for $MODELS machine models"
+[ "$MODELS" -gt 0 ] || { echo "$PRGNAM: no per-model data installed" >&2; exit 1; }
+
+for f in usr/share/pipewire/pipewire.conf.d/99-asahi.conf \
+         usr/share/pipewire/pipewire-pulse.conf.d/99-asahi.conf \
+         usr/share/wireplumber/wireplumber.conf.d/99-asahi.conf; do
+  [ -f "$PKG/$f" ] || { echo "$PRGNAM: missing $f" >&2; exit 1; }
+done
+echo "$PRGNAM: PipeWire and WirePlumber drop-ins present"
+
+# Confirm the generated aliases actually materialised, in case a later
+# Makefile stops generating them.
+ALIASES=$(find $PKG/usr/share/$PRGNAM -name 'graph-j*.json' | wc -l)
+echo "$PRGNAM: $ALIASES generated alias graphs"
+[ "$ALIASES" -gt 0 ] || { echo "$PRGNAM: alias graphs missing" >&2; exit 1; }
+
+# --- start the stack this configuration is for -------------------------------
+#
+# See the header. All three paths are new and owned by this package.
+install -Dm755 $CWD/start-session              $PKG/usr/share/$PRGNAM/start-session
+install -Dm644 $CWD/asahi-audio.desktop        $PKG/etc/xdg/autostart/asahi-audio.desktop
+install -Dm644 $CWD/99-asahi-no-autospawn.conf $PKG/etc/pulse/client.conf.d/99-asahi-no-autospawn.conf
+
+# Assert them, for the same reason the drop-ins above are asserted: a package
+# that silently shipped without these installs cleanly and leaves a desktop with
+# no sound, which is diagnosed as a hardware fault.
+for f in usr/share/$PRGNAM/start-session \
+         etc/xdg/autostart/asahi-audio.desktop \
+         etc/pulse/client.conf.d/99-asahi-no-autospawn.conf; do
+  [ -f "$PKG/$f" ] || { echo "$PRGNAM: missing $f" >&2; exit 1; }
+done
+[ -x "$PKG/usr/share/$PRGNAM/start-session" ] \
+  || { echo "$PRGNAM: start-session is not executable" >&2; exit 1; }
+sh -n "$PKG/usr/share/$PRGNAM/start-session" \
+  || { echo "$PRGNAM: start-session does not parse" >&2; exit 1; }
+# Phase 1 so PipeWire is up before the session's audio clients start asking for
+# a sink; an entry declaring no phase lands in the default, later one.
+#
+# ⚠ This is NOT what keeps PulseAudio away. KDE does not wait for a phase-1 entry to finish, so phase 1 buys sequencing,
+# not exclusion. The exclusion is doinst.sh. Do not read this assertion as the
+# defence.
+grep -qx 'X-KDE-autostart-phase=1' "$PKG/etc/xdg/autostart/asahi-audio.desktop" \
+  || { echo "$PRGNAM: autostart entry is not phase 1" >&2; exit 1; }
+
+# The launcher must repair a half-up session, not shrug at one. Exiting early
+# whenever a pipewire process exists misses precisely the state a
+# PulseAudio takeover leaves behind -- pipewire up, pipewire-pulse dead, and
+# re-running the launcher a no-op. Assert the per-daemon guard is still there.
+grep -qF 'running "$name" && return 0' "$PKG/usr/share/$PRGNAM/start-session" \
+  || { echo "$PRGNAM: start-session lost its per-daemon idempotency guard" >&2; exit 1; }
+# And it must never reach for a blunt pkill: `pkill -x daemon` takes out every
+# daemon(1) supervisor this user runs, one per PipeWire daemon, not only the
+# one being restarted.
+#
+# ⚠ Strip comments first. The script CONTAINS that string, in the comment
+# warning against it -- a check that does not strip them matches its own
+# documentation and fails the build.
+grep -vE '^[[:space:]]*#' "$PKG/usr/share/$PRGNAM/start-session" \
+  | grep -qE 'pkill[^|]*-x[[:space:]]+daemon' \
+  && { echo "$PRGNAM: start-session uses a blunt 'pkill -x daemon'" >&2; exit 1; }
+echo "$PRGNAM: session startup installed (pipewire + pulse-compat + wireplumber)"
+
+# --- the PulseAudio switch ---------------------------------------------------
+#
+# This and the kmix switch below are the changes this package makes outside
+# paths it owns, and removepkg reverses neither. They must therefore be
+# impossible to ship accidentally: assert both that the script is present and
+# that it still uses Slackware's own switch rather than something invented.
+install -Dm755 $CWD/doinst.sh $PKG/install/doinst.sh
+sh -n "$PKG/install/doinst.sh" \
+  || { echo "$PRGNAM: doinst.sh does not parse" >&2; exit 1; }
+grep -qF "printf 'Hidden=true" "$PKG/install/doinst.sh" \
+  || { echo "$PRGNAM: doinst.sh no longer writes the Hidden=true switch" >&2; exit 1; }
+grep -vE '^[[:space:]]*#' "$PKG/install/doinst.sh" | grep -qF 'etc/xdg/autostart/pulseaudio.desktop' \
+  || { echo "$PRGNAM: doinst.sh no longer targets pulseaudio.desktop" >&2; exit 1; }
+grep -q 'asahi-orig' "$PKG/install/doinst.sh" \
+  || { echo "$PRGNAM: doinst.sh no longer backs up the original" >&2; exit 1; }
+# The switch must follow rc.asahi-audio's executable bit, the documented way
+# back to PulseAudio, or an upgrade hides PulseAudio again; and so must
+# start-session, or PipeWire still starts at login.
+grep -vE '^[[:space:]]*#' "$PKG/install/doinst.sh" | grep -qF '[ -x "$RCAA" ]' \
+  || { echo "$PRGNAM: doinst.sh no longer honours rc.asahi-audio's executable bit" >&2; exit 1; }
+grep -vE '^[[:space:]]*#' "$PKG/usr/share/$PRGNAM/start-session" \
+  | grep -qF '[ ! -x /etc/rc.d/rc.asahi-audio ]' \
+  || { echo "$PRGNAM: start-session no longer honours rc.asahi-audio's executable bit" >&2; exit 1; }
+echo "$PRGNAM: doinst.sh will disable PulseAudio's autostart (reversible by hand)"
+
+# --- and the boot-time assertion --------------------------------------------
+#
+# doinst.sh alone is not enough. On a full-series install it runs BEFORE
+# pulseaudio -- asahi-audio sorts first in l/ -- so there is no
+# pulseaudio.desktop to edit yet, and pulseaudio's own install then lays down
+# the stock one, switch absent. That leaves two sound servers racing, which
+# ordering cannot decide. rc.asahi-audio re-asserts the switch every boot.
+#
+# Shipped as .new so it is an admin file: editing it modifies no package. It
+# ships executable, so a fresh install is enabled; doinst.sh installs it with
+# stock's preserve_perms(), so an upgrade keeps the admin's mode.
+mkdir -p $PKG/etc/rc.d
+install -m755 $CWD/rc.asahi-audio $PKG/etc/rc.d/rc.asahi-audio.new
+sh -n "$PKG/etc/rc.d/rc.asahi-audio.new" \
+  || { echo "$PRGNAM: rc.asahi-audio does not parse" >&2; exit 1; }
+grep -qF "printf 'Hidden=true" "$PKG/etc/rc.d/rc.asahi-audio.new" \
+  || { echo "$PRGNAM: rc.asahi-audio no longer writes the Hidden=true switch" >&2; exit 1; }
+# The switch is worthless if nothing invokes it. The boot hook is a package
+# file in Slackware ARM's hardware-model hook directory, sourced by rc.platform
+# just before rc.local; speakersafetyd.SlackBuild has the reasoning. Assert the
+# hook names the script, that doinst.sh still installs it, and that doinst.sh
+# has not gone back to writing rc.local, which leaves rc.local.new behind.
+grep -vE '^[[:space:]]*#' "$PKG/install/doinst.sh" | grep -qF 'rc.asahi-audio' \
+  || { echo "$PRGNAM: doinst.sh does not install rc.asahi-audio" >&2; exit 1; }
+install -Dm644 $CWD/rc.platform.d-$PRGNAM $PKG/etc/rc.d/rc.platform.d/aarch64/$PRGNAM
+bash -n $PKG/etc/rc.d/rc.platform.d/aarch64/$PRGNAM \
+  || { echo "$PRGNAM: the boot hook does not parse" >&2; exit 1; }
+grep -qF '/etc/rc.d/rc.asahi-audio start' $PKG/etc/rc.d/rc.platform.d/aarch64/$PRGNAM \
+  || { echo "$PRGNAM: the boot hook no longer starts rc.asahi-audio" >&2; exit 1; }
+grep -vE '^[[:space:]]*#' "$PKG/install/doinst.sh" | grep -qF 'etc/rc.d/rc.local' \
+  && { echo "$PRGNAM: doinst.sh writes rc.local again -- that leaves rc.local.new behind" >&2; exit 1; }
+echo "$PRGNAM: rc.asahi-audio installed; boot hook at /etc/rc.d/rc.platform.d/aarch64/$PRGNAM"
+
+# --- the kmix switch ---------------------------------------------------------
+#
+# kmix_autostart.desktop declares X-KDE-autostart-after=pulseaudio. The switch
+# above disables that entry, so the dependency names something which never runs
+# and kmix starts before any sound server -- falling back to the raw ALSA
+# controls, which speakersafetyd and the UCM profiles set and which are not a
+# volume control. AutoStart=false is kmix's own documented condition and
+# exactly what plasma-pa's kconf_update script writes. plasma-pa is the
+# replacement mixer.
+mkdir -p $PKG/etc/xdg
+install -m644 $CWD/kmixrc $PKG/etc/xdg/kmixrc.new
+grep -qx 'AutoStart=false' "$PKG/etc/xdg/kmixrc.new" \
+  || { echo "$PRGNAM: kmixrc does not disable kmix autostart" >&2; exit 1; }
+grep -qxF '[Global]' "$PKG/etc/xdg/kmixrc.new" \
+  || { echo "$PRGNAM: kmixrc has no [Global] section; the key would be ignored" >&2; exit 1; }
+grep -vE '^[[:space:]]*#' "$PKG/install/doinst.sh" | grep -qF 'kmixrc' \
+  || { echo "$PRGNAM: doinst.sh does not install kmixrc" >&2; exit 1; }
+# The shipped file is only the install-time half. Assert the boot half too, the
+# way the PulseAudio switch is guarded: rc.asahi-audio re-asserts AutoStart=false
+# at every boot.
+grep -vE '^[[:space:]]*#' "$PKG/etc/rc.d/rc.asahi-audio.new" | grep -qF 'AutoStart=false' \
+  || { echo "$PRGNAM: rc.asahi-audio no longer asserts the kmix switch" >&2; exit 1; }
+echo "$PRGNAM: kmix autostart disabled (plasma-pa is the mixer); asserted at boot"
+
+mkdir -p $PKG/usr/doc/$PRGNAM-$VERSION
+cp -a LICENSE* README* $PKG/usr/doc/$PRGNAM-$VERSION 2>/dev/null || true
+cat $CWD/$PRGNAM.SlackBuild > $PKG/usr/doc/$PRGNAM-$VERSION/$PRGNAM.SlackBuild
+
+mkdir -p $PKG/install
+cat $CWD/slack-desc > $PKG/install/slack-desc
+
+cd $PKG
+/sbin/makepkg -l y -c n $OUTPUT/$PRGNAM-$VERSION-$ARCH-$BUILD$TAG.txz

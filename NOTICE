@@ -1,0 +1,105 @@
+THIRD-PARTY NOTICES
+===================
+
+This tree is a Slackware port. Almost everything it produces is other people's
+software: this repository contributes build scripts, packaging, a small number
+of patches, and documentation. Those original parts are covered by LICENSE.
+Everything named below retains its own licence and its own copyright, which
+building or patching does not change.
+
+This file records who the work belongs to. It is not a licence grant.
+
+
+SLACKWARE
+---------
+
+Slackware and Slackware ARM/AArch64, by Patrick Volkerding and Stuart Winter
+respectively, are the distribution this ports. The media is built from
+Slackware's own installer, and the installer, setup and pkgtools are used
+unmodified except where docs/PORTING.md says otherwise.
+
+  source/slackware-k/sbin/slk-hwm-discover
+      Taken verbatim from Slackware ARM's kernel source tree. Stuart Winter's
+      copyright notice is intact and must remain so.
+
+Several SlackBuilds here derive from Slackware's own -- notably mesa-asahi and
+pipewire-lv2, which take their meson flag sets from Slackware's -- and retain the upstream
+copyright notices alongside ours.
+
+
+ASAHI LINUX
+-----------
+
+The Asahi Linux project is the reason any of this is possible. It produced the
+Apple Silicon kernel work, m1n1, the U-Boot port, the firmware tooling, and the
+audio DSP configuration this port packages:
+
+  linux (Asahi tree)     the driver delta this port rebases onto Slackware's
+                         own kernel source
+  m1n1                   Apple Silicon bootloader
+  u-boot (Asahi port)    UEFI environment
+  asahi-scripts          update-m1n1, asahi-diagnose, asahi-fwupdate
+  asahi-fwextract        vendor firmware extraction
+  asahi-audio            PipeWire/WirePlumber DSP configuration
+  alsa-ucm-conf-asahi    ALSA use-case configuration
+  speakersafetyd         speaker protection daemon
+  tiny-dfr               Touch Bar daemon
+
+
+OTHER UPSTREAM PROJECTS PACKAGED HERE
+-------------------------------------
+
+  Mesa, PipeWire, lv2, lilv, serd, sord, sratom, zix, lsp-plugins,
+  bankstown, triforce-lv2, lzfse.
+
+Each is packaged as its authors released it, with the build flags recorded in
+its SlackBuild. Where a package is a rebuild of one Slackware already ships,
+the version is unchanged and only the build options differ.
+
+
+PATCHES CARRIED VERBATIM
+------------------------
+
+These are not this project's work. They are carried under their own terms, with
+their Author and Signed-off-by lines intact:
+
+  source/hwm-bw-mac/patches/
+      Peter Robinson <pbrobinson@gmail.com>
+      Torsten Duwe <duwe@lst.de>
+      Davide Cavalca <dcavalca@meta.com>
+      Sebastian Reichel <sebastian.reichel@collabora.com>
+      Javier Martinez Canillas <javierm@redhat.com>
+      Andrea della Porta <andrea.porta@suse.com>
+
+  source/speakersafetyd/patches/
+      Janne Grunau <j@jannau.net>
+
+  source/tiny-dfr/patches/81.patch
+      Davide Cavalca <davide@asahilinux.org>
+
+
+PATCHES ORIGINATING HERE
+------------------------
+
+  source/kernel_armv8-mac/patches/0001..0002    GPL-2.0, as kernel code is
+  source/asahi-fwextract/patches/0001..0002     MIT, as asahi-fwextract is
+  source/asahi-scripts/patches/0001             MIT, as asahi-scripts is
+
+Each is offered under the licence of the project it patches, and carries its
+reasoning in the patch header. All are intended for upstream and should be
+dropped from this tree once upstream takes them.
+
+
+PRIOR ART
+---------
+
+Earlier efforts showed publicly that this was possible before any of it was
+attempted here, with one credited in README.md.
+No code from these efforts is shipped here.
+
+
+TRADEMARKS
+----------
+
+See LICENSE. This is an unofficial port, not endorsed by or affiliated with
+Slackware, the Asahi Linux project, Apple, or anyone else.

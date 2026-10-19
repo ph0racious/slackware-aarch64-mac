@@ -1,0 +1,21 @@
+Use setuptools instead of the removed distutils.core.
+
+asahi-fwextract's setup.py imports distutils.core.  Python 3.12 removed
+distutils from the stdlib, so on Slackware AArch64-current that import works
+only through the copy setuptools bundles.
+
+setuptools.setup is the supported entry point: a drop-in superset of
+distutils.core.setup that accepts the same packages= and entry_points=
+arguments, and generates the asahi-fwextract console script from them,
+without depending on that bundled copy.
+
+--- a/setup.py
++++ b/setup.py
+@@ -1,6 +1,6 @@
+ #!/usr/bin/env python
+ 
+-from distutils.core import setup
++from setuptools import setup
+ 
+ setup(name='asahi_firmware',
+       version='0.1',

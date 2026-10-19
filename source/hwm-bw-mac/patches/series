@@ -1,0 +1,57 @@
+# U-Boot patch series for Apple Silicon, applied in this order with -p1.
+#
+# Taken verbatim from AsahiLinux/PKGBUILDs uboot-asahi at commit d0f67365
+# (u-boot tag asahi-v2026.04-2); each file matches that PKGBUILD's sha256sums.
+# Order is significant -- several of the uefi/efi_loader patches touch the
+# same files and will not apply out of sequence.
+#
+# Roughly half of these are not Apple-related.  The asahi-alarm maintainers
+# share one patch set across several Arch Linux ARM platforms, so the Rockchip,
+# Raspberry Pi, Jetson and Allwinner patches come along for the ride.  They
+# apply cleanly to the tree, and all but one hunk touch board and driver files
+# that apple_m1_defconfig never compiles, so they are inert for our build.
+#
+# The exception is ARM-RPi5-Enable-PCIe.patch's hunk in drivers/nvme/nvme.c,
+# which the Apple build does compile: it passes every DMA address through
+# dev_phys_to_bus().  Apple's NVMe node has no dma-ranges, so that is the
+# identity there, and Asahi's own U-Boot carries the same series; the
+# behaviour is upstream's.
+#
+# They are kept anyway: applying the set verbatim is what upstream tests, and
+# dropping entries risks context conflicts in the patches that follow.  Do not
+# prune this list without rebuilding and diffing u-boot-nodtb.bin.
+#
+# Lines beginning with '#' and blank lines are ignored.
+
+# --- generic boot behaviour ---
+disable-VBE-by-default.patch
+enable-bootmenu-by-default.patch
+
+# --- UEFI / EFI loader: these DO affect the Apple build, all but the first ---
+# --- (it edits config_distro_bootcmd.h, unused by the Apple build) ---
+uefi-distro-load-FDT-from-any-partition-on-boot-device.patch
+uefi-Add-all-options-for-EFI-System-Partitions.patch
+0001-Revert-efi_loader-install-device-tree-on-configurati.patch
+uefi-initial-find_fdt_location-for-finding-the-DT-on-disk.patch
+uefi-enable-SetVariableRT-with-volotile-storage.patch
+uefi-enable-https-boot-by-default.patch
+efi_loader-disk-Add-EFI_PARTITION_INFO_PROTOCOL-support-for-MBR.patch
+
+# --- USB Power Delivery ---
+USB-PD-TCPM-improvements.patch
+
+# --- other boards, kept for upstream parity; inert on apple_m1_defconfig ---
+# --- but for the RPi5 PCIe patch's nvme.c hunk (see the top) ---
+rockchip-Enable-preboot-start-for-pci-usb.patch
+rockchip-rk3568-nanopi-r5-Drop-duplicated-extra-sdhc.patch
+rockchip-rk356x-Stop-overriding-sdhci-mmc-aliases.patch
+p3450-fix-board.patch
+JetsonTX2-Fix-upstream-device-tree-naming.patch
+Allwinner-fix-booting-on-a-number-of-devices.patch
+ARM-RPi5-Enable-PCIe.patch
+0001-Add-bcm2712-compat.patch
+ARM-RPi-PCIe-fixes.patch
+raspberrypi-Add-quirk-for-RPi5-2Gb-rev-1.0.patch
+
+# --- host build fix, must be last ---
+openssl-no-engine.patch

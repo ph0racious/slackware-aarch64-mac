@@ -1,0 +1,19 @@
+# HOW TO EDIT THIS FILE:
+# The "handy ruler" below makes it easier to edit a package description.
+# Line up the first '|' above the ':' following the base package name, and
+# the '|' on the right side marks the last column you can put a character in.
+# You must make exactly 11 lines for the formatting to be correct. It's also
+# customary to leave one space after the ':' except on otherwise blank lines.
+
+         |-----handy-ruler------------------------------------------------------|
+bankstown: bankstown (LV2 psychoacoustic bass enhancement)
+bankstown:
+bankstown: A lightweight LV2 plugin that synthesises missing bass fundamentals
+bankstown: from their harmonics, so small speakers appear to reproduce low
+bankstown: frequencies they are physically incapable of producing.
+bankstown:
+bankstown: Used by asahi-audio in the PipeWire filter chain for Apple Silicon
+bankstown: speakers.
+bankstown: REQUIRED by asahi-audio for bass enhancement.
+bankstown: Written by James Calligeros for the Asahi Linux project.
+bankstown: Homepage: https://github.com/chadmed/bankstown

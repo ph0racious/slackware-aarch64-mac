@@ -1,0 +1,119 @@
+drm/apple: re-request the timing table when DCP returns an empty one
+
+On a freshly established DPTX session the DCP firmware sometimes publishes an
+EMPTY TimingElements array. dcpep_process_chunks() warns "TimingElements
+without valid modes!", enumerate_modes() iterates zero entries, dcp->nr_modes
+stays 0, and there is nothing for DRM to set -- the output stays dark until
+something forces another hotplug.
+
+Failing plugs emit no iomfb_parse_mode_* tracepoints at all, which is what
+distinguishes this from a parsing fault: the parser is never called, because
+it is handed a zero-length list.
+
+The fault alternates rather than being intermittent. Between suspends,
+dptxport[port].connected is cleared on this path only via dcp_poweroff(),
+which runs only when a display was genuinely active. So a plug that SUCCEEDED
+tears the session down on unplug and leaves the next one to a fresh connect,
+while a plug that FAILED leaves the session up and the next one reuses the
+table the firmware still holds.
+
+Releasing the session and connecting again makes the firmware republish, which
+is exactly what a physical re-plug does. dcp_start() already contains this
+sequence for the same hardware, behind the never-defined
+DCP_DPTX_DISCONNECT_ON_INIT, with a comment noting it is "only necessary when
+using dcp0 on j473, j474s and presumedly j475c".
+
+Only the hotplug path retries. The probe and power-on paths inherit a session
+brought up by m1n1.
+
+This is not a link fault: the link comes up normally on failing plugs, well
+inside dcp_dptx_connect's two second timeout.
+
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -373,6 +373,16 @@
+ 
+ #define DPTX_CONNECT_TIMEOUT msecs_to_jiffies(2000)
+ 
++/*
++ * How many times to ask DCP to republish its timing table before giving up,
++ * and how long to wait for it after the link is configured. dcp_dptx_connect()
++ * returns once linkcfg completes; the table follows roughly
++ * 150ms later, so 750ms is comfortably clear of it without stalling the
++ * threaded IRQ for long.
++ */
++#define DPTX_MODES_RETRIES	3
++#define DPTX_MODES_SETTLE_MS	750
++
+ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
+ {
+ 	int ret = 0;
+@@ -467,6 +477,59 @@
+ 	return dcp_dptx_disconnect(dcp, port);
+ }
+ 
++/*
++ * Connect, and make sure the session came up with a usable timing table.
++ *
++ * A session carried over from a previous plug is unaffected -- the firmware
++ * still holds the table from last time. A freshly established one may come
++ * back empty, and nothing else will prompt DCP to publish again, so ask it to
++ * by releasing and reconnecting, which is what a physical re-plug does.
++ */
++static void dcp_dptx_connect_with_modes(struct apple_dcp *dcp, u32 port)
++{
++	unsigned int attempt;
++
++	for (attempt = 0; attempt < DPTX_MODES_RETRIES; attempt++) {
++		if (attempt) {
++			if (dcp->dptxport[port].enabled)
++				dptxport_set_hpd(dcp->dptxport[port].service,
++						 false);
++			dcp_dptx_disconnect(dcp, port);
++			usleep_range(10 * USEC_PER_MSEC, 25 * USEC_PER_MSEC);
++		}
++
++		dcp_dptx_connect(dcp, port);
++
++		/* The table arrives asynchronously, after linkcfg completes. */
++		msleep(DPTX_MODES_SETTLE_MS);
++
++		/*
++		 * nr_modes is written from the RTKit callback thread. A plain
++		 * read is enough -- we only need to observe that it became
++		 * non-zero -- but mark it so it is not hoisted out of the loop.
++		 */
++		if (READ_ONCE(dcp->nr_modes))
++			return;
++
++		/*
++		 * Do not keep cycling a port whose sink has gone away in the
++		 * meantime; the disconnect path will deal with it.
++		 */
++		if (dcp->hdmi_hpd && !gpiod_get_value_cansleep(dcp->hdmi_hpd)) {
++			dev_info(dcp->dev, "%s: sink went away while retrying\n",
++				 __func__);
++			return;
++		}
++
++		dev_info(dcp->dev,
++			 "%s: no timing modes after attempt %u, asking DCP to republish\n",
++			 __func__, attempt + 1);
++	}
++
++	dev_warn(dcp->dev, "%s: still no timing modes after %u attempts\n",
++		 __func__, DPTX_MODES_RETRIES);
++}
++
+ static irqreturn_t dcp_dp2hdmi_hpd(int irq, void *data)
+ {
+ 	struct apple_dcp *dcp = data;
+@@ -487,7 +550,7 @@
+ 	}
+ 
+ 	if (connected)
+-		dcp_dptx_connect(dcp, 0);
++		dcp_dptx_connect_with_modes(dcp, 0);
+ 
+ 	return IRQ_HANDLED;
+ }

@@ -1,0 +1,19 @@
+# HOW TO EDIT THIS FILE:
+# The "handy ruler" below makes it easier to edit a package description.
+# Line up the first '|' above the ':' following the base package name, and
+# the '|' on the right side marks the last column you can put a character in.
+# You must make exactly 11 lines for the formatting to be correct. It's also
+# customary to leave one space after the ':' except on otherwise blank lines.
+
+   |-----handy-ruler------------------------------------------------------|
+lv2: lv2 (LV2 audio plugin specification)
+lv2:
+lv2: The LV2 plugin specification: headers and Turtle files defining the
+lv2: interface between audio plugins and their hosts. Needed to build lilv
+lv2: and sratom, and read by hosts to describe installed plugins.
+lv2:
+lv2:
+lv2:
+lv2:
+lv2: REQUIRED by the Apple Silicon audio chain (LV2 SDK).
+lv2: Homepage: https://lv2plug.in/
